@@ -109,10 +109,22 @@ def simulate_subscribers(cfg: SimConfig = SimConfig()) -> pd.DataFrame:
     base[cohort == "regular"] = rng.gamma(2.5, 6.0,  size=(cohort == "regular").sum())
     base[cohort == "casual"]  = rng.gamma(2.0, 1.5,  size=(cohort == "casual").sum())
 
+    # `base` is the user's typical monthly watch hours.
+    # The three time-window columns must be on the same monthly-rate
+    # baseline so downstream trend ratios are interpretable:
+    #   watch_30d == base when trend == 0
+    #   watch_90d == base * 3 when trend == 0  (three months of consistent watching)
+    #   watch_7d  == base * 7/30 when trend == 0  (one week's proportion)
+    #
+    # `trend` modulates short-term behavior. Recent windows feel the
+    # trend more strongly than the long window (which averages over more
+    # history). The 90d window gets a small inverse adjustment so a
+    # user trending UP in the last 7-30 days has slightly LOWER 90d
+    # totals (because their longer-run rate was lower), and vice versa.
     trend = rng.normal(loc=0.0, scale=0.30, size=n)
-    watch_hours_last_90d = base.round(1)
+    watch_hours_last_90d = (base * 3 * np.exp(-trend * 0.2)).round(1)
     watch_hours_last_30d = (base * np.exp(trend * 0.5)).round(1)
-    watch_hours_last_7d  = (base * np.exp(trend * 1.5) * (7 / 30)).round(2)
+    watch_hours_last_7d  = (base * (7 / 30) * np.exp(trend * 1.5)).round(2)
 
     def _distinct_from_hours(hours: np.ndarray, sd_noise: float) -> np.ndarray:
         return np.clip(
@@ -300,14 +312,18 @@ def main(out_path: str | Path = "data/subscribers.csv") -> None:
     print("\nUnivariate churn correlations (>= 0.15 = strong):")
     for col in [
         "watch_hours_last_7d", "watch_hours_last_30d", "watch_hours_last_90d",
-        "distinct_titles_7d", "distinct_titles_30d", "distinct_titles_90d",
+        "support_tickets_30d", "payment_failures_30d",
         "days_since_last_login", "logins_last_30d",
-        "support_tickets_7d", "support_tickets_30d", "support_tickets_90d",
-        "payment_failures_30d", "payment_failures_90d", "payment_failures_180d",
-        "days_since_plan_change", "days_until_promo_expires",
-        "tenure_months", "auto_renew", "monthly_revenue",
     ]:
-        s = df[col].astype(int) if df[col].dtype == bool else df[col]
+        corr = df[col].corr(df["churned_next_30d"])
+        flag = "  **" if abs(corr) > 0.15 else ""
+        print(f"  {col:<30}  {corr:+.3f}{flag}")
+
+    out_path = Path("data/subscribers.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    print(f"\nWrote {len(df):,} rows -> {out_path}")
+dtype == bool else df[col]
         corr = s.corr(df["churned_next_30d"])
         flag = "STRONG" if abs(corr) > 0.15 else (
                "moderate" if abs(corr) > 0.05 else "weak")

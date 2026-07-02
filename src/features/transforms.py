@@ -42,7 +42,7 @@ def add_engagement_features(df: pd.DataFrame) -> pd.DataFrame:
     ).clip(upper=3.0)
 
     # Same trend but 30d vs 90d -- captures slower-burn decline that the
-    # 7d signal would miss.
+    # 7d signal would miss. Stable users land at ~1.0, declining < 1, growing > 1.
     out["watch_trend_30d_to_90d"] = (
         (out["watch_hours_last_30d"] * 3) /
         out["watch_hours_last_90d"].clip(lower=0.1)

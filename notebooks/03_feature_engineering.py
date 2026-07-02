@@ -208,4 +208,23 @@ print("  - watch_trend_7d_to_30d   (declining engagement = strongest leading sig
 print("  - tickets_recency_ratio   (recent escalation)")
 print("  - plan_change_risk_score  (continuous lifecycle risk)")
 print("  - high_risk_segment_flag  (heatmap-derived fallback rule)")
-print("\nReady for Phase 4 (modeling -- LR baseline + XGBoost + calibration).")
+
+print("\n" + "=" * 70)
+print("60-SECOND TAKEAWAY")
+print("=" * 70)
+print("""
+Phase 3 turned raw subscriber columns into 17 engineered features
+across 5 groups. Most do not beat raw correlations one-on-one -- that
+is expected, since tree models earn their value through INTERACTIONS,
+not univariate signal. The standout is `high_risk_segment_flag`: 10pp
+churn lift (15.2% vs 5.2%) on the m2-trial x casual cohort, which
+works both as a model feature AND as a standalone retention rule the
+team could ship without any model.
+
+No multicollinearity above 0.85, so every feature carries unique
+information. We are deliberately NOT pruning features before
+modeling -- that would drop features that only matter in combinations.
+SHAP in Phase 5 ranks them properly.
+""")
+
+print("Ready for Phase 4 (modeling -- LR baseline + XGBoost + calibration).")

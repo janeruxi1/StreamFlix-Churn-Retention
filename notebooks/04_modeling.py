@@ -327,6 +327,3 @@ with open(model_path, "wb") as f:
     pickle.dump(artifact, f)
 print(f"\nSaved -> {model_path}")
 print(f"\nReady for Phase 5 (SHAP -- actionable retention levers).")
-ct, f)
-print(f"\nSaved -> {model_path}")
-print(f"\nReady for Phase 5 (SHAP -- actionable retention levers).")
