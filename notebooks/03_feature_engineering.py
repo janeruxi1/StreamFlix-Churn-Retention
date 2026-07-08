@@ -210,7 +210,7 @@ print("  - plan_change_risk_score  (continuous lifecycle risk)")
 print("  - high_risk_segment_flag  (heatmap-derived fallback rule)")
 
 print("\n" + "=" * 70)
-print("60-SECOND TAKEAWAY")
+print("KEY TAKEAWAYS")
 print("=" * 70)
 print("""
 Phase 3 turned raw subscriber columns into 17 engineered features
