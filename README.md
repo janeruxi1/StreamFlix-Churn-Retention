@@ -120,7 +120,7 @@ The project is built in 9 phases that mirror an end-to-end retention modeling wo
 5. ✅ **Phase 4:** Modeling — LR baseline → XGBoost + calibration
 6. ✅ **Phase 5:** SHAP — actionable retention levers
 7. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep
-8. ⬜ **Phase 7:** Decision memo + Streamlit decision-support app
+8. ✅ **Phase 7:** Decision memo + Streamlit decision-support app
 9. ⬜ **Phase 8:** Production polish (tests, CI, deploy)
 
 ---
