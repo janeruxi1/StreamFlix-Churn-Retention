@@ -32,7 +32,12 @@ Thumbs.db
 
 # Private notes (not pushed to GitHub)
 reports/interview_qa.md
+reports/prep/
 
 # Trained model artifacts (regenerable from notebooks/04_modeling.py)
 models/*.pkl
+
+# MLflow tracking artifacts (local runs; regenerable)
+mlruns/
+mlartifacts/
 

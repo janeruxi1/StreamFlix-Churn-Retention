@@ -1,5 +1,6 @@
 # 💸 StreamFlix Subscriber Retention — Cost-Aware Churn Targeting
 
+[![Live Demo](https://img.shields.io/badge/Streamlit-Live%20Demo-FF4B4B?logo=streamlit)](https://janeruxi1-streamflix-churn-retention.streamlit.app/)
 ![CI](https://github.com/janeruxi1/StreamFlix-churn-retention/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-61%20passing-brightgreen)
@@ -38,6 +39,7 @@ Metric framework: [`reports/metrics_framework.md`](./reports/metrics_framework.m
 | Exploratory + survival analysis (KM, landmark analysis) | `notebooks/02_eda.py` |
 | Feature engineering with reusable transformers | `notebooks/03_feature_engineering.py`, `src/features/` |
 | Model training, calibration, and evaluation | `notebooks/04_modeling.py`, `src/models/` |
+| Experiment tracking (MLflow) | `src/models/tracking.py`, `notebooks/04_modeling.py` |
 | SHAP explainability framed as actionable retention levers | `notebooks/05_shap_levers.py` |
 | Cost-aware decision rule + ROI sweep | `notebooks/06_decision_rule.py`, `src/decisions/` |
 | Stakeholder decision memo + hero figure | `reports/decision_memo.md`, `notebooks/07_hero_figure.py` |
@@ -129,6 +131,21 @@ Two tabs:
 - **Per-user lookup** — pick a subscriber ID, see the risk score, diagnostic features, and recommended lever
 
 Sidebar controls let anyone poke at the budget, per-lever cost, uplift assumptions, and blanket-baseline parameters. The app imports directly from `src/`, so the math is the same as the notebooks and is protected by the same 61 unit tests. See [`app/README.md`](./app/README.md) for deployment to Streamlit Community Cloud.
+
+**Live demo:** [https://janeruxi1-streamflix-churn-retention.streamlit.app/](https://janeruxi1-streamflix-churn-retention.streamlit.app/)
+
+---
+
+## 📈 Experiment tracking (MLflow)
+
+Every model run in `notebooks/04_modeling.py` is wrapped in an MLflow context (`src/models/tracking.py`) that logs parameters, metrics, and the fitted model. Three runs land in the local `mlruns/` store: `lr_baseline`, `xgboost_uncalibrated`, `xgboost_calibrated`.
+
+```bash
+python notebooks/04_modeling.py        # runs land in mlruns/
+mlflow ui                              # localhost:5000 — compare runs
+```
+
+MLflow is an optional dependency; if it isn't installed, the tracking calls no-op silently so the pipeline still works in lightweight environments (including CI). This keeps the code path clean without forcing every reviewer to install MLflow.
 
 ---
 

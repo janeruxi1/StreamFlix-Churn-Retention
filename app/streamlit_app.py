@@ -40,9 +40,61 @@ st.set_page_config(
 )
 
 
+# --- Bootstrap: generate data + model if missing (for Streamlit Cloud) ----
+def _bootstrap_if_needed() -> None:
+    """First-boot setup for Streamlit Cloud, where the repo is cloned
+    fresh and data/ and models/ are gitignored."""
+    data_path = Path("data/subscribers.csv")
+    model_path = Path("models/churn_model_v1.pkl")
+
+    if not data_path.exists():
+        with st.spinner("First-boot setup: generating synthetic dataset..."):
+            from src.data.simulate import simulate_subscribers, SimConfig
+            data_path.parent.mkdir(parents=True, exist_ok=True)
+            simulate_subscribers(SimConfig()).to_csv(data_path, index=False)
+
+    if not model_path.exists():
+        with st.spinner("First-boot setup: training model (this runs once)..."):
+            from sklearn.model_selection import train_test_split
+            from src.models.train import (
+                train_logistic_regression, train_xgboost, calibrate_xgboost,
+            )
+            from src.models.evaluate import compute_metrics
+            raw = load_subscribers(str(data_path))
+            df = build_features(raw)
+            X, y = prepare_features(df)
+            X_temp, X_test, y_temp, y_test = train_test_split(
+                X, y, test_size=0.2, stratify=y, random_state=42,
+            )
+            X_train, X_calib, y_train, y_calib = train_test_split(
+                X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42,
+            )
+            lr = train_logistic_regression(X_train, y_train)
+            xgb = train_xgboost(X_train, y_train)
+            xgb_cal = calibrate_xgboost(xgb, X_calib, y_calib, method="sigmoid")
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(model_path, "wb") as f:
+                pickle.dump({
+                    "production_model": xgb_cal,
+                    "baseline_model": lr,
+                    "feature_names": list(X.columns),
+                    "metrics": {
+                        "production": compute_metrics(
+                            y_test, xgb_cal.predict_proba(X_test)[:, 1]),
+                        "baseline": compute_metrics(
+                            y_test, lr.predict_proba(X_test)[:, 1]),
+                    },
+                    "training_meta": {
+                        "n_train": len(X_train), "n_calib": len(X_calib),
+                        "n_test": len(X_test), "positive_rate": float(y.mean()),
+                    },
+                }, f)
+
+
 # --- Load everything once ------------------------------------------------
 @st.cache_resource
 def load_pipeline():
+    _bootstrap_if_needed()
     raw = load_subscribers("data/subscribers.csv")
     df = build_features(raw)
     X, y = prepare_features(df)

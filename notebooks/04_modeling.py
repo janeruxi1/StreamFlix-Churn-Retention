@@ -41,6 +41,7 @@ from src.models.train import (
 from src.models.evaluate import (
     compute_metrics, top_k_metrics, calibration_curve_points,
 )
+from src.models.tracking import mlflow_run
 
 FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -78,12 +79,26 @@ print(f"  test:  n={len(X_test):,}  positive_rate={y_test.mean():.4f}")
 # =====================================================================
 # B. Logistic regression baseline
 # =====================================================================
+# Every model variant is wrapped in an MLflow run so we can compare
+# runs in the tracking UI (`mlflow ui` -> localhost:5000). If MLflow
+# isn't installed, mlflow_run() no-ops and we fall through to the
+# untracked path -- keeps CI lightweight.
 print("\n" + "=" * 70)
 print("B. LOGISTIC REGRESSION BASELINE")
 print("=" * 70)
-lr = train_logistic_regression(X_train, y_train)
-lr_proba_test = lr.predict_proba(X_test)[:, 1]
-lr_metrics = compute_metrics(y_test, lr_proba_test)
+with mlflow_run("lr_baseline") as run:
+    lr = train_logistic_regression(X_train, y_train)
+    lr_proba_test = lr.predict_proba(X_test)[:, 1]
+    lr_metrics = compute_metrics(y_test, lr_proba_test)
+    if run is not None:
+        run.log_params({
+            "model_type": "logistic_regression",
+            "penalty": "l2", "C": 1.0, "max_iter": 2000,
+            "n_train": len(X_train), "n_features": X_train.shape[1],
+            "random_state": 42,
+        })
+        run.log_metrics(lr_metrics)
+        run.log_model(lr, name="model")
 print("Metrics on test set:")
 for k, v in lr_metrics.items():
     print(f"  {k:<10} {v:.4f}")
@@ -95,9 +110,21 @@ for k, v in lr_metrics.items():
 print("\n" + "=" * 70)
 print("C. XGBOOST (UNCALIBRATED)")
 print("=" * 70)
-xgb = train_xgboost(X_train, y_train)
-xgb_proba_test = xgb.predict_proba(X_test)[:, 1]
-xgb_metrics = compute_metrics(y_test, xgb_proba_test)
+with mlflow_run("xgboost_uncalibrated") as run:
+    xgb = train_xgboost(X_train, y_train)
+    xgb_proba_test = xgb.predict_proba(X_test)[:, 1]
+    xgb_metrics = compute_metrics(y_test, xgb_proba_test)
+    if run is not None:
+        run.log_params({
+            "model_type": "xgboost",
+            "n_estimators": 300, "max_depth": 5, "learning_rate": 0.05,
+            "subsample": 0.85, "colsample_bytree": 0.85,
+            "min_child_weight": 5, "reg_lambda": 1.0,
+            "objective": "binary:logistic", "eval_metric": "aucpr",
+            "n_train": len(X_train), "n_features": X_train.shape[1],
+        })
+        run.log_metrics(xgb_metrics)
+        run.log_model(xgb, name="model")
 print("Metrics on test set:")
 for k, v in xgb_metrics.items():
     print(f"  {k:<10} {v:.4f}")
@@ -113,9 +140,19 @@ print("=" * 70)
 # metrics (PR-AUC, ROC-AUC are invariant under monotonic transforms).
 # Isotonic is more flexible but creates probability ties that hurt
 # ranking on small positive classes.
-xgb_cal = calibrate_xgboost(xgb, X_calib, y_calib, method="sigmoid")
-xgb_cal_proba_test = xgb_cal.predict_proba(X_test)[:, 1]
-xgb_cal_metrics = compute_metrics(y_test, xgb_cal_proba_test)
+with mlflow_run("xgboost_calibrated") as run:
+    xgb_cal = calibrate_xgboost(xgb, X_calib, y_calib, method="sigmoid")
+    xgb_cal_proba_test = xgb_cal.predict_proba(X_test)[:, 1]
+    xgb_cal_metrics = compute_metrics(y_test, xgb_cal_proba_test)
+    if run is not None:
+        run.log_params({
+            "model_type": "xgboost_calibrated",
+            "calibration_method": "sigmoid_platt",
+            "n_calib": len(X_calib),
+            "base_run": "xgboost_uncalibrated",
+        })
+        run.log_metrics(xgb_cal_metrics)
+        run.log_model(xgb_cal, name="model")
 print("Metrics on test set:")
 for k, v in xgb_cal_metrics.items():
     print(f"  {k:<10} {v:.4f}")

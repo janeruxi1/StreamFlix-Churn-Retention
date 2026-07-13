@@ -2,13 +2,20 @@
 
 Interactive tool for the Retention team. Adjust intervention costs, uplifts, and budget to see how the recommended policy changes.
 
+**Live demo:** [https://janeruxi1-streamflix-churn-retention.streamlit.app/](https://janeruxi1-streamflix-churn-retention.streamlit.app/)
+
 ## Run locally
 
 ```bash
 pip install -r requirements.txt
+streamlit run app/streamlit_app.py
+```
+
+The app auto-generates `data/subscribers.csv` and trains `models/churn_model_v1.pkl` on first boot if they're missing — one-time setup takes ~30 seconds, cached thereafter. To pre-generate them (faster first boot):
+
+```bash
 python src/data/simulate.py                  # generate the dataset
 python notebooks/04_modeling.py              # train the model
-streamlit run app/streamlit_app.py
 ```
 
 ## What's inside
@@ -29,4 +36,9 @@ The app imports directly from `src/` — the same code path the analysis noteboo
 
 ## Deploy publicly (Streamlit Community Cloud — free)
 
-- Streamlit will need `data/subscribers.csv` and `models/churn_model_v1.pkl` present at deploy time. Either commit small snapshots, or add a startup script that regenerates them.
+1. Push the repo to GitHub (data and model files are gitignored; app auto-generates them on first boot).
+2. Sign in at [share.streamlit.io](https://share.streamlit.io) with GitHub.
+3. Click **New app** → select the `StreamFlix-churn-retention` repo → main branch → `app/streamlit_app.py`.
+4. First boot takes ~30–45 seconds (data generation + model training). Every subsequent visit uses the cached artifacts.
+
+No secrets or environment variables needed. The default deployment URL follows the pattern `https://<username>-<repo>.streamlit.app/`.
