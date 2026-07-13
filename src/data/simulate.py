@@ -323,11 +323,6 @@ def main(out_path: str | Path = "data/subscribers.csv") -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
     print(f"\nWrote {len(df):,} rows -> {out_path}")
-dtype == bool else df[col]
-        corr = s.corr(df["churned_next_30d"])
-        flag = "STRONG" if abs(corr) > 0.15 else (
-               "moderate" if abs(corr) > 0.05 else "weak")
-        print(f"  {col:<26}  corr = {corr:+.3f}  {flag}")
 
 
 if __name__ == "__main__":

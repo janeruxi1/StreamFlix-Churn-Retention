@@ -21,22 +21,29 @@ Functions:
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import shap
+
+# shap is imported lazily inside compute_shap_values() so that the
+# rest of this module (FEATURE_INTERVENTION_MAP, map_to_intervention,
+# global_importance, local_explanation) is usable in environments
+# without the heavy shap/numba dependency chain -- notably CI.
+if TYPE_CHECKING:
+    import shap  # noqa: F401
 
 
 def compute_shap_values(model, X: pd.DataFrame,
                         sample_size: Optional[int] = None,
-                        random_state: int = 42) -> shap.Explanation:
+                        random_state: int = 42):
     """Run TreeExplainer on an XGBoost model.
 
     For a large test set we can subsample to speed things up -- the
     explanations don't need every row. Set sample_size=None to use
     every row.
     """
+    import shap  # local import: heavy dep, not needed for the intervention map
     if sample_size is not None and sample_size < len(X):
         X = X.sample(n=sample_size, random_state=random_state)
     explainer = shap.TreeExplainer(model)
@@ -44,7 +51,7 @@ def compute_shap_values(model, X: pd.DataFrame,
     return explanation
 
 
-def global_importance(shap_values: shap.Explanation,
+def global_importance(shap_values,
                       feature_names: List[str],
                       top_n: int = 15) -> pd.DataFrame:
     """Rank features by mean |SHAP value| across the sample.
@@ -65,7 +72,7 @@ def global_importance(shap_values: shap.Explanation,
     return out
 
 
-def local_explanation(shap_values: shap.Explanation,
+def local_explanation(shap_values,
                       X: pd.DataFrame,
                       feature_names: List[str],
                       idx: int,

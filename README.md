@@ -1,10 +1,15 @@
 # 💸 StreamFlix Subscriber Retention — Cost-Aware Churn Targeting
 
-![Status](https://img.shields.io/badge/status-in%20progress-yellow)
+![CI](https://github.com/janeruxi1/StreamFlix-churn-retention/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Tests](https://img.shields.io/badge/tests-61%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 > **Cost-aware customer-retention system** for a fictional streaming subscription business. End-to-end: from a calibrated churn-probability model to an ROI-optimized intervention policy and a deployed decision-support tool. Sister project to [`StreamFlix-AB-Testing`](../StreamFlix-AB-Testing), built on the same StreamFlix context.
+
+![Hero](reports/figures/07_hero_summary.png)
+
+**Bottom line:** the current blanket $5 credit campaign runs a $6.3k monthly loss. The targeted policy delivers **+$3.3k net expected value at less than 6% of the current spend** — a **$9.6k monthly swing**. Full analysis in [`notebooks/06_decision_rule.ipynb`](./notebooks/06_decision_rule.ipynb); recommendation in [`reports/decision_memo.md`](./reports/decision_memo.md).
 
 ---
 
@@ -121,7 +126,7 @@ The project is built in 9 phases that mirror an end-to-end retention modeling wo
 6. ✅ **Phase 5:** SHAP — actionable retention levers
 7. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep
 8. ✅ **Phase 7:** Decision memo + Streamlit decision-support app
-9. ⬜ **Phase 8:** Production polish (tests, CI, deploy)
+9. ✅ **Phase 8:** Production polish (61 unit tests, GitHub Actions CI, MIT license)
 
 ---
 
