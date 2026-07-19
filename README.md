@@ -6,7 +6,7 @@
 ![Tests](https://img.shields.io/badge/tests-61%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-> **Cost-aware customer-retention system** for a streaming subscription business modeled on real subscription-economy dynamics (churn bands, tenure spikes, engagement cohorts, intervention menus). End-to-end: from a calibrated churn-probability model to an ROI-optimized intervention policy and a deployed decision-support tool. Sister project to [`StreamFlix-AB-Testing`](../StreamFlix-AB-Testing), built on the same StreamFlix context.
+> **Cost-aware customer-retention system** for a streaming subscription business modeled on real subscription-economy dynamics (churn bands, tenure spikes, engagement cohorts, intervention menus). End-to-end: from a calibrated churn-probability model to an ROI-optimized intervention policy and a deployed decision-support tool. Sister project to [`StreamFlix-AB-Testing`](https://github.com/janeruxi1/StreamFlix-AB-Testing), built on the same StreamFlix context.
 
 ![Hero](reports/figures/07_hero_summary.png)
 
