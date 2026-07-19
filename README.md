@@ -1,7 +1,7 @@
 # 💸 StreamFlix Subscriber Retention — Cost-Aware Churn Targeting
 
 [![Live Demo](https://img.shields.io/badge/Streamlit-Live%20Demo-FF4B4B?logo=streamlit)](https://janeruxi1-streamflix-churn-retention.streamlit.app/)
-![CI](https://github.com/janeruxi1/StreamFlix-churn-retention/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/janeruxi1/StreamFlix-Churn-Retention/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Tests](https://img.shields.io/badge/tests-61%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)

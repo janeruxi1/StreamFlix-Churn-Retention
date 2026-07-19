@@ -38,7 +38,7 @@ The app imports directly from `src/` — the same code path the analysis noteboo
 
 1. Push the repo to GitHub (data and model files are gitignored; app auto-generates them on first boot).
 2. Sign in at [share.streamlit.io](https://share.streamlit.io) with GitHub.
-3. Click **New app** → select the `StreamFlix-churn-retention` repo → main branch → `app/streamlit_app.py`.
+3. Click **New app** → select the `StreamFlix-Churn-Retention` repo → main branch → `app/streamlit_app.py`.
 4. First boot takes ~30–45 seconds (data generation + model training). Every subsequent visit uses the cached artifacts.
 
 No secrets or environment variables needed. The default deployment URL follows the pattern `https://<username>-<repo>.streamlit.app/`.
