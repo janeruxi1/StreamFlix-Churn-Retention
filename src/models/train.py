@@ -1,10 +1,14 @@
 """Model training utilities for the StreamFlix churn pipeline.
 
-Three trainers + one prep helper:
-    prepare_features()        -- raw df -> (X, y) model-ready matrix
-    train_logistic_regression -- regularized LR baseline
-    train_xgboost             -- gradient-boosted trees
-    calibrate_xgboost         -- isotonic post-hoc calibration
+Trainers + prep helper:
+    prepare_features           -- raw df -> (X, y) model-ready matrix
+    train_logistic_regression  -- regularized LR baseline
+    train_xgboost              -- gradient-boosted trees
+    train_random_forest        -- bagged trees, different bias-variance
+    train_hist_gbm             -- sklearn's native GBM implementation
+    train_lightgbm             -- LightGBM alternative
+    tune_xgboost_optuna        -- Bayesian hyperparameter tuning
+    calibrate_xgboost          -- Platt / isotonic post-hoc calibration
 
 Design principles:
     - Stateless: no hidden train/test leakage. The one piece of state
@@ -13,12 +17,12 @@ Design principles:
     - Calibration kept SEPARATE from the base model. We don't use
       `scale_pos_weight` -- it sacrifices calibration for ranking,
       and the Phase 6 decision rule needs calibrated probabilities.
-    - LR and XGBoost share the same input matrix so the comparison is
-      apples-to-apples.
+    - LR and tree models share the same input matrix so the comparison
+      is apples-to-apples.
 """
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -26,6 +30,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
 from xgboost import XGBClassifier
 
 
@@ -60,15 +65,12 @@ def prepare_features(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:
 
     feat = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
 
-    # Cast booleans to int (XGBoost wants numeric; LR doesn't care)
     for col in BOOLEAN_COLS:
         if col in feat.columns:
             feat[col] = feat[col].astype(int)
 
-    # One-hot encode categoricals
     feat = pd.get_dummies(feat, columns=CATEGORICAL_COLS, drop_first=False)
 
-    # Cast any remaining bool dummy columns to int
     for col in feat.columns:
         if feat[col].dtype == bool:
             feat[col] = feat[col].astype(int)
@@ -92,7 +94,7 @@ def train_logistic_regression(X_train: pd.DataFrame,
             penalty="l2",
             C=1.0,
             max_iter=2000,
-            class_weight=None,    # keep calibration; let policy handle imbalance
+            class_weight=None,
             random_state=random_state,
             n_jobs=-1,
         )),
@@ -118,7 +120,7 @@ def train_xgboost(X_train: pd.DataFrame,
         min_child_weight=5,
         reg_lambda=1.0,
         objective="binary:logistic",
-        eval_metric="aucpr",        # primary metric matches imbalanced setting
+        eval_metric="aucpr",
         random_state=random_state,
         tree_method="hist",
         n_jobs=-1,
@@ -127,6 +129,148 @@ def train_xgboost(X_train: pd.DataFrame,
     return model
 
 
+def train_random_forest(X_train: pd.DataFrame,
+                        y_train: pd.Series,
+                        random_state: int = 42) -> RandomForestClassifier:
+    """Random Forest -- different bias-variance tradeoff vs boosted trees."""
+    model = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=12,
+        min_samples_split=20,
+        min_samples_leaf=10,
+        max_features="sqrt",
+        n_jobs=-1,
+        random_state=random_state,
+        class_weight=None,
+    )
+    model.fit(X_train, y_train)
+    return model
+
+
+def train_hist_gbm(X_train: pd.DataFrame,
+                   y_train: pd.Series,
+                   random_state: int = 42) -> HistGradientBoostingClassifier:
+    """Sklearn's HistGradientBoostingClassifier -- sklearn's native GBM,
+    similar family to XGBoost but different implementation."""
+    model = HistGradientBoostingClassifier(
+        max_iter=300,
+        max_depth=5,
+        learning_rate=0.05,
+        min_samples_leaf=25,
+        l2_regularization=1.0,
+        random_state=random_state,
+    )
+    model.fit(X_train, y_train)
+    return model
+
+
+def train_lightgbm(X_train: pd.DataFrame,
+                   y_train: pd.Series,
+                   random_state: int = 42):
+    """LightGBM -- alternative gradient boosting library. Import is lazy
+    so lightgbm is an optional dependency (not needed in CI).
+
+    On Windows we've seen intermittent C++-side access violations when
+    LightGBM's Dataset object receives mixed-dtype pandas frames. Convert
+    X to float32 and y to int32 numpy arrays before the fit call, and
+    use single-threaded training to sidestep OpenMP DLL conflicts.
+    """
+    try:
+        from lightgbm import LGBMClassifier
+    except ImportError:
+        raise ImportError(
+            "LightGBM not installed. `pip install lightgbm` to enable this "
+            "model in the bake-off, or skip this trainer."
+        )
+    X_arr = np.asarray(X_train, dtype=np.float32)
+    y_arr = np.asarray(y_train, dtype=np.int32)
+
+    model = LGBMClassifier(
+        n_estimators=300,
+        max_depth=5,
+        learning_rate=0.05,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        min_child_samples=20,
+        reg_lambda=1.0,
+        objective="binary",
+        random_state=random_state,
+        n_jobs=1,
+        verbosity=-1,
+    )
+    X_arr_df = pd.DataFrame(X_arr, columns=list(X_train.columns))
+    model.fit(X_arr_df, y_arr)
+    return model
+
+
+def tune_xgboost_optuna(X_train: pd.DataFrame,
+                        y_train: pd.Series,
+                        X_val: pd.DataFrame,
+                        y_val: pd.Series,
+                        n_trials: int = 25,
+                        random_state: int = 42) -> Tuple[XGBClassifier, Dict]:
+    """Bayesian hyperparameter tuning for XGBoost via Optuna.
+
+    Optimizes PR-AUC on a held-out validation set. Optuna's TPE sampler
+    focuses probe density in high-reward regions, so 25 trials get most
+    of the value of a larger grid search at a fraction of the cost.
+
+    Returns (fitted_best_model, best_params_dict).
+    """
+    try:
+        import optuna
+        from sklearn.metrics import average_precision_score
+    except ImportError:
+        raise ImportError(
+            "Optuna not installed. `pip install optuna` to enable "
+            "hyperparameter tuning."
+        )
+
+    def objective(trial):
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 100, 500, step=50),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight", 1, 20),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.1, 10.0, log=True),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-3, 10.0, log=True),
+        }
+        model = XGBClassifier(
+            **params,
+            objective="binary:logistic",
+            eval_metric="aucpr",
+            tree_method="hist",
+            random_state=random_state,
+            n_jobs=-1,
+        )
+        model.fit(X_train, y_train, verbose=False)
+        val_proba = model.predict_proba(X_val)[:, 1]
+        return average_precision_score(y_val, val_proba)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=random_state),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    best_model = XGBClassifier(
+        **study.best_params,
+        objective="binary:logistic",
+        eval_metric="aucpr",
+        tree_method="hist",
+        random_state=random_state,
+        n_jobs=-1,
+    )
+    best_model.fit(X_train, y_train, verbose=False)
+    return best_model, study.best_params
+
+
+# ---------------------------------------------------------------------
+# Calibration wrapper
+# ---------------------------------------------------------------------
 def calibrate_xgboost(base_model: XGBClassifier,
                       X_calib: pd.DataFrame,
                       y_calib: pd.Series,
@@ -146,14 +290,12 @@ def calibrate_xgboost(base_model: XGBClassifier,
     measurably hurt PR-AUC on small positive classes.
     """
     try:
-        # sklearn >= 1.6
         from sklearn.frozen import FrozenEstimator
         calibrated = CalibratedClassifierCV(
             estimator=FrozenEstimator(base_model),
             method=method,
         )
     except ImportError:
-        # sklearn < 1.6 (legacy prefit pattern)
         calibrated = CalibratedClassifierCV(
             estimator=base_model,
             method=method,

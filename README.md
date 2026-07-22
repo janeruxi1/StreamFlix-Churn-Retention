@@ -39,7 +39,8 @@ Metric framework: [`reports/metrics_framework.md`](./reports/metrics_framework.m
 | Exploratory + survival analysis (KM, landmark analysis) | `notebooks/02_eda.py` |
 | Feature engineering with reusable transformers | `notebooks/03_feature_engineering.py`, `src/features/` |
 | Model training, calibration, and evaluation | `notebooks/04_modeling.py`, `src/models/` |
-| Experiment tracking (MLflow) | `src/models/tracking.py`, `notebooks/04_modeling.py` |
+| Model bake-off across 5 families + Optuna tuning | `notebooks/04b_model_comparison.py` |
+| Experiment tracking (MLflow) | `src/models/tracking.py`, `notebooks/04_modeling.py`, `04b_model_comparison.py` |
 | SHAP explainability framed as actionable retention levers | `notebooks/05_shap_levers.py` |
 | Cost-aware decision rule + ROI sweep | `notebooks/06_decision_rule.py`, `src/decisions/` |
 | Stakeholder decision memo + hero figure | `reports/decision_memo.md`, `notebooks/07_hero_figure.py` |
@@ -76,6 +77,7 @@ python src/data/simulate.py    # regenerates data/subscribers.csv
 │   ├── 02_eda.py / .ipynb               # Segment rates + KM + landmark analysis
 │   ├── 03_feature_engineering.py / .ipynb  # Reusable feature transforms
 │   ├── 04_modeling.py / .ipynb          # LR baseline → XGBoost + calibration
+│   ├── 04b_model_comparison.py / .ipynb # 5-family bake-off + Optuna tuning
 │   ├── 05_shap_levers.py / .ipynb       # SHAP → actionable retention levers
 │   ├── 06_decision_rule.py / .ipynb     # Cost-aware policy + ROI sweep
 │   └── 07_hero_figure.py / .ipynb       # Builds reports/figures/07_hero_summary.png
@@ -138,7 +140,7 @@ Sidebar controls let anyone poke at the budget, per-lever cost, uplift assumptio
 
 ## 📈 Experiment tracking (MLflow)
 
-Every model run in `notebooks/04_modeling.py` is wrapped in an MLflow context (`src/models/tracking.py`) that logs parameters, metrics, and the fitted model. Three runs land in the local `mlruns/` store: `lr_baseline`, `xgboost_uncalibrated`, `xgboost_calibrated`.
+Every model run — in both `notebooks/04_modeling.py` (production pipeline) and `notebooks/04b_model_comparison.py` (bake-off + tuning) — is wrapped in an MLflow context (`src/models/tracking.py`) that logs parameters, metrics, and the fitted model. Six-plus runs land in the local `mlruns/` store: `lr_baseline`, `xgboost_uncalibrated`, `xgboost_calibrated`, `hist_gbm`, `random_forest`, `lightgbm`, `xgboost_tuned`.
 
 ```bash
 python notebooks/04_modeling.py        # runs land in mlruns/

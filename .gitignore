@@ -40,4 +40,5 @@ models/*.pkl
 # MLflow tracking artifacts (local runs; regenerable)
 mlruns/
 mlartifacts/
+mlflow.db
 
