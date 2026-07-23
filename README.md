@@ -140,7 +140,7 @@ Sidebar controls let anyone poke at the budget, per-lever cost, uplift assumptio
 
 ## 📈 Experiment tracking (MLflow)
 
-Every model run — in both `notebooks/04_modeling.py` (production pipeline) and `notebooks/04b_model_comparison.py` (bake-off + tuning) — is wrapped in an MLflow context (`src/models/tracking.py`) that logs parameters, metrics, and the fitted model. Six-plus runs land in the local `mlruns/` store: `lr_baseline`, `xgboost_uncalibrated`, `xgboost_calibrated`, `hist_gbm`, `random_forest`, `lightgbm`, `xgboost_tuned`.
+Every model run — in both `notebooks/04_modeling.py` (production pipeline) and `notebooks/04b_model_comparison.py` (bake-off + tuning) — is wrapped in an MLflow context (`src/models/tracking.py`) that logs parameters, metrics, and the fitted model. Six-plus runs land in the local SQLite store (`mlflow.db`): `lr_baseline`, `xgboost_uncalibrated`, `xgboost_calibrated`, `hist_gbm`, `random_forest`, `xgboost_tuned` (plus optional `lightgbm` if installed). Launch the tracking UI with `mlflow ui` from the project root; runs appear under the `streamflix_churn` experiment.
 
 ```bash
 python notebooks/04_modeling.py        # runs land in mlruns/
@@ -177,10 +177,11 @@ The project is built in 9 phases that mirror an end-to-end retention modeling wo
 3. ✅ **Phase 2:** EDA + survival analysis (KM, landmark analysis, sensitivity)
 4. ✅ **Phase 3:** Feature engineering
 5. ✅ **Phase 4:** Modeling — LR baseline → XGBoost + calibration
-6. ✅ **Phase 5:** SHAP — actionable retention levers
-7. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep
-8. ✅ **Phase 7:** Decision memo + Streamlit decision-support app
-9. ✅ **Phase 8:** Production polish (61 unit tests, GitHub Actions CI, MIT license)
+6. ✅ **Phase 4b:** Model comparison — 5-family bake-off + Optuna tuning + MLflow tracking
+7. ✅ **Phase 5:** SHAP — actionable retention levers
+8. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep
+9. ✅ **Phase 7:** Decision memo + Streamlit decision-support app
+10. ✅ **Phase 8:** Production polish (61 unit tests, GitHub Actions CI, MIT license)
 
 ---
 
