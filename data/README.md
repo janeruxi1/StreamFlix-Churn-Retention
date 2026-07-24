@@ -32,7 +32,7 @@ The simulator was iterated to match real workplace subscription-churn data:
 - **Continuous lifecycle features** — `days_since_plan_change` and `days_until_promo_expires` are continuous (not boolean) so the model can learn the right threshold itself rather than being given an arbitrary 14-day cutoff
 - **Tenure spikes** — month 2 (trial-to-paid drop) and month 12 (annual reassessment) elevated churn, matching the PM brief and real-world patterns
 
-## Schema (28 columns)
+## Schema (33 columns)
 
 ### Identity & demographics
 | Column | Type | Description |
@@ -88,7 +88,18 @@ The simulator was iterated to match real workplace subscription-churn data:
 | Column | Type | Description |
 |---|---|---|
 | `monthly_revenue` | float | Monthly revenue this subscriber contributes |
-| `churned_next_30d` | int | 1 if churned in next 30 days, 0 otherwise — **PRIMARY TARGET** |
+| `churned_next_30d` | int | 1 if churned in next 30 days *under no intervention* (control potential outcome) — **PRIMARY TARGET for Phase 4** |
+
+### Uplift experiment — added in v4 (Phase 4c)
+Simulates a randomized retention experiment: 50% of users receive a lever from the intervention menu, 50% are control. Both the observed outcome and the counterfactual are recorded so the uplift model can be trained *and* validated against ground truth.
+
+| Column | Type | Description |
+|---|---|---|
+| `treated` | int | 1 if user received a treatment, 0 if control (~50/50 split) |
+| `treatment_lever` | str | Assigned lever: `email_nudge`, `credit_5`, `credit_10`, `content_push`, `premium_upgrade`, or `none` for control |
+| `churned_if_treated` | int | 1/0 counterfactual outcome under the assigned lever |
+| `y_observed` | int | Observed outcome under actual assignment = `churned_if_treated` if treated else `churned_next_30d`. **PRIMARY TARGET for Phase 4c uplift modeling.** |
+| `true_uplift` | float | Ground-truth per-user retention lift for the assigned lever (positive = churn reduced). Held out for validation only — never a feature. |
 
 ## Ground truth (hidden from the model)
 
@@ -112,22 +123,38 @@ The simulator embeds the following truths the modeling and policy phases should 
   - 1-month free Premium upgrade is most effective for tenured low-engagement users
 - **Customer LTV per tier:** Basic $9 / mo, Standard $14 / mo, Premium $19 / mo (× tier-specific expected retention months)
 
-## Realism audit (v1 → v2 → v3)
+### Uplift-specific ground truth (v4)
+The randomized treatment layer embeds:
+
+- **Base per-lever uplift:** 3% (email_nudge) → 6% (content_push) → 10% (credit_5) → 15% (credit_10) → 18% (premium_upgrade). "Uplift" = absolute reduction in P(churn).
+- **Segment × lever heterogeneity multipliers:**
+  - Payment-failure users × credit levers → **1.6×** (fixing the actual pain point)
+  - Casual users × content push → **1.5×** (they don't know what to watch)
+  - Heavy users × email nudge → **0.3×** (already engaged, nudge is noise)
+  - Trial-drop users (tenure = 2) × credit_5 → **1.8×** (the classic month-2 save)
+  - Expiring-promo users × credit_10 → **1.5×** (renews the promo window)
+- **Sleeping dogs (~5%):** treatment *increases* churn (mod = −0.6× the base). Realistic — the "we miss you" nudge reminds them to cancel. Uplift models are expected to identify and skip these; propensity-only models can't.
+- **Randomization:** treatment is assigned independently of features (Bernoulli 0.5), so any Phase 4c uplift model trained on this data operates in a proper experimental setting.
+
+## Realism audit (v1 → v2 → v3 → v4)
 
 The simulator was iterated based on successive realism audits:
 
-| Realism check | v1 | v2 | v3 | Target |
-|---|---|---|---|---|
-| Heavy users (>30 hrs/mo) | 5.1% | 13.1% | **13.1%** | 10–15% |
-| Casual users (<3 hrs/mo) | 1.4% | 16.8% | **16.8%** | 20–30% |
-| Engagement trend windows | none | 3 windows | **3 windows** | required |
-| Distinct-title trend windows | none | 1 window | **3 windows** | consistent with hours |
-| Support-ticket trend windows | none | 1 window | **3 windows** | recent ≫ old in real data |
-| Payment-failure trend windows | none | 1 window | **3 windows** | recent ≫ old in real data |
-| Login activity-count companion | none | none | **`logins_last_30d`** | both recency AND density |
-| Lifecycle events as continuous | n/a | booleans | **numeric (days)** | lets model learn thresholds |
-| Multi-window nesting (math) | n/a | n/a | **Poisson thinning** | matches real event-stream feature pipelines |
-| Overall churn rate | 5.45% | 6.49% | **5.34%** | 4–8% |
+| Realism check | v1 | v2 | v3 | v4 | Target |
+|---|---|---|---|---|---|
+| Heavy users (>30 hrs/mo) | 5.1% | 13.1% | 13.1% | **13.1%** | 10–15% |
+| Casual users (<3 hrs/mo) | 1.4% | 16.8% | 16.8% | **16.8%** | 20–30% |
+| Engagement trend windows | none | 3 windows | 3 windows | **3 windows** | required |
+| Distinct-title trend windows | none | 1 window | 3 windows | **3 windows** | consistent with hours |
+| Support-ticket trend windows | none | 1 window | 3 windows | **3 windows** | recent ≫ old in real data |
+| Payment-failure trend windows | none | 1 window | 3 windows | **3 windows** | recent ≫ old in real data |
+| Login activity-count companion | none | none | `logins_last_30d` | **`logins_last_30d`** | both recency AND density |
+| Lifecycle events as continuous | n/a | booleans | numeric (days) | **numeric (days)** | lets model learn thresholds |
+| Multi-window nesting (math) | n/a | n/a | Poisson thinning | **Poisson thinning** | matches real event-stream pipelines |
+| Randomized treatment layer | n/a | n/a | n/a | **50/50 + 5 levers** | required for uplift modeling |
+| Heterogeneous treatment effects | n/a | n/a | n/a | **segment × lever multipliers** | real interventions don't have flat uplift |
+| Sleeping-dog segment | n/a | n/a | n/a | **~5% negative uplift** | matches published retention experiments |
+| Overall churn rate (control) | 5.45% | 6.49% | 5.34% | **5.34%** | 4–8% |
 
 ### v1 → v2 fix
 v1 had unimodal engagement (no heavy/casual cohorts) and no time-series. v2 added engagement cohorts and 3 watch-hour windows.
@@ -135,4 +162,7 @@ v1 had unimodal engagement (no heavy/casual cohorts) and no time-series. v2 adde
 ### v2 → v3 fix
 v2 was inconsistent: 3 watch-hour windows but only 1 distinct-titles window, 1 support-ticket count, 1 payment-failure count. v3 makes every count-style feature multi-window (using Poisson thinning so windows nest correctly) and replaces simple booleans (`recent_downgrade`, `promo_expires_soon`) with continuous `days_since_*` features so the model can learn the right thresholds.
 
-The v3 dataset is structurally indistinguishable from what a real Retention team would hand to a data scientist on day 1.
+### v3 → v4 fix (Phase 4c prep)
+v3 gave every user the same "no treatment" world — no way to train an uplift model against it. v4 adds a randomized experimental layer on top of v3 (all v3 columns are unchanged, so Phase 4-6 keep working). Five new columns: `treated`, `treatment_lever`, `churned_if_treated`, `y_observed`, `true_uplift`. The heterogeneity multipliers and sleeping-dog segment give the four uplift meta-learners in Phase 4c something to actually differ on — otherwise a fixed-uplift constant would beat every model.
+
+The v4 dataset is structurally indistinguishable from what a real Retention team would hand to a data scientist on day 1, *plus* the extra experimental columns a mature team would collect from an ongoing A/B holdout.
