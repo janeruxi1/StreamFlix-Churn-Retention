@@ -61,6 +61,86 @@ def top_k_metrics(y_true, y_proba, k: float = 0.10) -> Dict[str, float]:
     }
 
 
+# ---------------------------------------------------------------------
+# Uplift-model evaluation (Phase 4c)
+# ---------------------------------------------------------------------
+def compute_uplift_metrics(y_true, uplift, treatment,
+                           strategy: str = "overall") -> Dict[str, float]:
+    """Compute the standard tier of uplift-model scores.
+
+    We evaluate on the RETENTION framing (positive uplift = retained
+    users saved) rather than the churn framing (negative uplift = churn
+    reduced). This keeps every metric interpretable as "higher is better."
+
+    Returns:
+        qini_auc              -- Qini AUC on retention (analog of ROC-AUC
+                                 for uplift). Higher = better; 0 = random.
+        retention_lift_at_30  -- Absolute retention lift when targeting
+                                 the top 30% of users by predicted lift.
+                                 Reads as "additional retained users per
+                                 targeted user, vs. targeting at random."
+        retention_lift_at_10  -- Same at top-10% (tighter budget).
+
+    Sign convention:
+        We take uplift as the model's predicted P(churn|T=1)-P(churn|T=0)
+        (sklift-native, negative for retention treatments). Internally we
+        flip both the outcome (y_retained = 1 - y_churn) and the score
+        (predicted_retention_lift = -predicted_churn_uplift) so sklift's
+        "higher is better" metrics apply directly.
+    """
+    try:
+        from sklift.metrics import qini_auc_score, uplift_at_k
+    except ImportError:
+        raise ImportError(
+            "scikit-uplift is required for uplift evaluation. "
+            "Install with `pip install scikit-uplift`."
+        )
+    y_churn = np.asarray(y_true)
+    uplift = np.asarray(uplift)
+    treatment = np.asarray(treatment)
+
+    y_retained = 1 - y_churn
+    retention_score = -uplift
+
+    qini = qini_auc_score(y_retained, retention_score, treatment)
+    u30 = uplift_at_k(y_retained, retention_score, treatment,
+                      strategy=strategy, k=0.30)
+    u10 = uplift_at_k(y_retained, retention_score, treatment,
+                      strategy=strategy, k=0.10)
+    return {
+        "qini_auc": float(qini),
+        "retention_lift_at_30pct": float(u30),
+        "retention_lift_at_10pct": float(u10),
+    }
+
+
+def qini_curve_points(y_true, uplift, treatment) -> pd.DataFrame:
+    """Return the (share_targeted, cumulative_retention_lift) points
+    that make up a Qini curve. Feed the columns straight into matplotlib.
+
+    Uses the retention framing (see compute_uplift_metrics): higher
+    curves = better model. A diagonal line = random targeting; a curve
+    above the diagonal = the model beats random.
+    """
+    try:
+        from sklift.metrics import qini_curve
+    except ImportError:
+        raise ImportError(
+            "scikit-uplift is required. `pip install scikit-uplift`."
+        )
+    y_churn = np.asarray(y_true)
+    uplift = np.asarray(uplift)
+    treatment = np.asarray(treatment)
+
+    y_retained = 1 - y_churn
+    x, y = qini_curve(y_retained, -uplift, treatment)
+    n = len(y_churn)
+    return pd.DataFrame({
+        "share_targeted": x / max(n, 1),
+        "cumulative_retention_lift": y,
+    })
+
+
 def calibration_curve_points(y_true, y_proba, n_bins: int = 10):
     """Bin probabilities into n_bins quantile bins and compute
     (mean predicted prob, fraction positive) per bin.

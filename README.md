@@ -3,7 +3,7 @@
 [![Live Demo](https://img.shields.io/badge/Streamlit-Live%20Demo-FF4B4B?logo=streamlit)](https://janeruxi1-streamflix-churn-retention.streamlit.app/)
 ![CI](https://github.com/janeruxi1/StreamFlix-Churn-Retention/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-61%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-72%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 > **Cost-aware customer-retention system** for a streaming subscription business modeled on real subscription-economy dynamics (churn bands, tenure spikes, engagement cohorts, intervention menus). End-to-end: from a calibrated churn-probability model to an ROI-optimized intervention policy and a deployed decision-support tool. Sister project to [`StreamFlix-AB-Testing`](https://github.com/janeruxi1/StreamFlix-AB-Testing), built on the same StreamFlix context.
@@ -40,7 +40,8 @@ Metric framework: [`reports/metrics_framework.md`](./reports/metrics_framework.m
 | Feature engineering with reusable transformers | `notebooks/03_feature_engineering.py`, `src/features/` |
 | Model training, calibration, and evaluation | `notebooks/04_modeling.py`, `src/models/` |
 | Model bake-off across 5 families + Optuna tuning | `notebooks/04b_model_comparison.py` |
-| Experiment tracking (MLflow) | `src/models/tracking.py`, `notebooks/04_modeling.py`, `04b_model_comparison.py` |
+| Causal / uplift modeling (T-, S-, X-learners + Qini) | `notebooks/04c_uplift_modeling.py`, `src/models/uplift.py` |
+| Experiment tracking (MLflow) | `src/models/tracking.py`, `notebooks/04_modeling.py`, `04b_model_comparison.py`, `04c_uplift_modeling.py` |
 | SHAP explainability framed as actionable retention levers | `notebooks/05_shap_levers.py` |
 | Cost-aware decision rule + ROI sweep | `notebooks/06_decision_rule.py`, `src/decisions/` |
 | Stakeholder decision memo + hero figure | `reports/decision_memo.md`, `notebooks/07_hero_figure.py` |
@@ -78,6 +79,7 @@ python src/data/simulate.py    # regenerates data/subscribers.csv
 │   ├── 03_feature_engineering.py / .ipynb  # Reusable feature transforms
 │   ├── 04_modeling.py / .ipynb          # LR baseline → XGBoost + calibration
 │   ├── 04b_model_comparison.py / .ipynb # 5-family bake-off + Optuna tuning
+│   ├── 04c_uplift_modeling.py / .ipynb  # Uplift (T/S/X-learner) + Qini evaluation
 │   ├── 05_shap_levers.py / .ipynb       # SHAP → actionable retention levers
 │   ├── 06_decision_rule.py / .ipynb     # Cost-aware policy + ROI sweep
 │   └── 07_hero_figure.py / .ipynb       # Builds reports/figures/07_hero_summary.png
@@ -89,8 +91,9 @@ python src/data/simulate.py    # regenerates data/subscribers.csv
 │   │   └── transforms.py            # RFM, behavioral, billing aggregates
 │   ├── models/
 │   │   ├── train.py                 # Train + persist
-│   │   ├── evaluate.py              # ROC/PR/Brier/calibration
-│   │   └── explain.py               # SHAP utilities
+│   │   ├── evaluate.py              # ROC/PR/Brier/calibration + Qini AUC
+│   │   ├── explain.py               # SHAP utilities
+│   │   └── uplift.py                # T/S/X-learners for causal uplift
 │   └── decisions/
 │       └── policy.py                # Cost-aware decision rule
 ├── tests/                           # pytest unit tests
@@ -153,7 +156,7 @@ MLflow is an optional dependency; if it isn't installed, the tracking calls no-o
 
 ## 🧪 Testing & CI
 
-The `src/` modules are covered by **61 pytest unit tests** that run on every push via GitHub Actions across Python 3.10, 3.11, and 3.12. Coverage spans:
+The `src/` modules are covered by **72 pytest unit tests** that run on every push via GitHub Actions across Python 3.10, 3.11, and 3.12. Coverage spans:
 
 - Cost-aware decision rule (EV math, best-lever selection, budget cap, premium cap, blanket-baseline simulator, policy summary)
 - Feature engineering (idempotency, no-mutation, engineered-column ranges, tenure bucketing)
@@ -161,6 +164,7 @@ The `src/` modules are covered by **61 pytest unit tests** that run on every pus
 - Metrics (PR-AUC, ROC-AUC, Brier, top-K precision/recall, calibration curve)
 - Model prep (drops IDs and target, one-hot categoricals, bool → int, all numeric, no nulls)
 - SHAP intervention map (lever/cost lookup, unknown-feature placeholder, one-hot suffix handling)
+- Uplift models (per-user prediction shape, heterogeneity capture, Qini metric sanity, uplift-based policy skips sleeping dogs)
 
 Two of the regression tests specifically catch bugs found during development: the simulator's multi-window watch-hour scaling, and the engineered trend-ratio clip ceiling.
 
@@ -178,10 +182,11 @@ The project is built in 9 phases that mirror an end-to-end retention modeling wo
 4. ✅ **Phase 3:** Feature engineering
 5. ✅ **Phase 4:** Modeling — LR baseline → XGBoost + calibration
 6. ✅ **Phase 4b:** Model comparison — 5-family bake-off + Optuna tuning + MLflow tracking
-7. ✅ **Phase 5:** SHAP — actionable retention levers
-8. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep
-9. ✅ **Phase 7:** Decision memo + Streamlit decision-support app
-10. ✅ **Phase 8:** Production polish (61 unit tests, GitHub Actions CI, MIT license)
+7. ✅ **Phase 4c:** Uplift (causal) modeling — T/S/X-learners + Qini AUC, per-user retention lift replaces the fixed-uplift constant
+8. ✅ **Phase 5:** SHAP — actionable retention levers
+9. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep
+10. ✅ **Phase 7:** Decision memo + Streamlit decision-support app
+11. ✅ **Phase 8:** Production polish (72 unit tests, GitHub Actions CI, MIT license)
 
 ---
 
@@ -194,6 +199,7 @@ The project is built in 9 phases that mirror an end-to-end retention modeling wo
 - **Cost-aware threshold optimization** — replaces the default 0.5 threshold with one chosen to maximize expected net retention value under a budget cap
 - **Sensitivity analysis on budget and intervention cost** — the recommendation is robust to assumption changes
 - **SHAP framed as retention levers, not feature importance** — every flagged subscriber is paired with a *what to do about it* line, by segment
+- **Causal uplift modeling on top of the propensity model** — replaces the fixed-uplift constant in the decision rule with a learned per-user causal treatment effect, so the policy targets true persuadables and avoids sleeping dogs (users whom treatment would push toward churn)
 
 ---
 

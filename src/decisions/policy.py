@@ -183,6 +183,72 @@ def summarize_policy(policy: pd.DataFrame,
     }
 
 
+# ---------------------------------------------------------------------
+# Uplift-based lever selection (Phase 4c)
+# ---------------------------------------------------------------------
+def pick_best_lever_uplift(uplift_by_lever: Dict[str, np.ndarray],
+                           ltv: np.ndarray,
+                           menu: Dict[str, Dict[str, float]] = INTERVENTION_MENU,
+                           ) -> pd.DataFrame:
+    """Uplift-aware version of pick_best_lever.
+
+    Instead of `P(churn) * uplift_constant * LTV - cost`, this uses the
+    per-user LEARNED retention lift from an uplift model:
+
+        EV(user, L) = retention_lift(user, L) * LTV(tier) - cost(L)
+
+    Where `retention_lift(user, L) = P(churn|control) - P(churn|treated)`,
+    which is the sign-flipped output of a scikit-uplift model.
+
+    Advantages over the fixed-uplift version:
+      - Catches "persuadables" that a P(churn)-only model would miss
+        because their absolute churn probability isn't high, but
+        treatment shifts them a lot.
+      - Skips "sleeping dogs" — users with negative retention lift
+        (treatment makes them more likely to churn). Fixed-uplift
+        pulls them in whenever P(churn) is high; uplift-based excludes
+        them because their per-user lift is negative.
+
+    Parameters:
+        uplift_by_lever: {lever_name: per_user_retention_lift_array}.
+                         Missing levers are skipped. If passed with only
+                         one lever, the returned policy uses that lever
+                         exclusively (with a "none" fallback for users
+                         whose EV goes non-positive).
+        ltv:             per-user LTV.
+        menu:            intervention menu (for costs).
+
+    Returns:
+        DataFrame with columns best_lever, best_ev, cost.
+    """
+    n = len(ltv)
+    lever_names = list(uplift_by_lever.keys())
+    if not lever_names:
+        raise ValueError("uplift_by_lever must contain at least one lever")
+
+    ev_matrix = np.column_stack([
+        uplift_by_lever[l] * ltv - menu[l]["cost"]
+        for l in lever_names
+    ])
+    max_idx = ev_matrix.argmax(axis=1)
+    max_ev = ev_matrix.max(axis=1)
+    best_lever = np.array([lever_names[i] for i in max_idx])
+    costs = np.array([menu[n]["cost"] for n in best_lever])
+
+    # No intervention if best EV <= 0 (including sleeping dogs with
+    # negative uplift on every lever)
+    no_action = max_ev <= 0
+    best_lever[no_action] = "none"
+    costs[no_action] = 0.0
+    max_ev[no_action] = 0.0
+
+    return pd.DataFrame({
+        "best_lever": best_lever,
+        "best_ev": max_ev,
+        "cost": costs,
+    })
+
+
 def simulate_blanket_campaign(p_churn: np.ndarray,
                               ltv: np.ndarray,
                               tenure_months: np.ndarray,

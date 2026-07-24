@@ -37,7 +37,13 @@ from xgboost import XGBClassifier
 # ---------------------------------------------------------------------
 # Feature prep
 # ---------------------------------------------------------------------
-DROP_COLS = ["subscriber_id", "monthly_revenue", "churned_next_30d"]
+DROP_COLS = [
+    "subscriber_id", "monthly_revenue", "churned_next_30d",
+    # Phase 4c uplift-experiment columns: not features, hold aside for
+    # uplift training / evaluation only.
+    "treated", "treatment_lever", "churned_if_treated",
+    "y_observed", "true_uplift",
+]
 # monthly_revenue is collinear with plan_tier AND is the LTV input the
 # Phase 6 decision rule consumes -- exclude from training features.
 

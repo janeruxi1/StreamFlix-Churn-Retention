@@ -12,6 +12,9 @@ shap>=0.44
 # Hyperparameter tuning
 optuna>=3.4
 
+# Causal / uplift modeling (Phase 4c)
+scikit-uplift>=0.5
+
 # Experiment tracking
 mlflow>=2.9
 
