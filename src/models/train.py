@@ -6,7 +6,6 @@ Trainers + prep helper:
     train_xgboost              -- gradient-boosted trees
     train_random_forest        -- bagged trees, different bias-variance
     train_hist_gbm             -- sklearn's native GBM implementation
-    train_lightgbm             -- LightGBM alternative
     tune_xgboost_optuna        -- Bayesian hyperparameter tuning
     calibrate_xgboost          -- Platt / isotonic post-hoc calibration
 
@@ -39,7 +38,7 @@ from xgboost import XGBClassifier
 # ---------------------------------------------------------------------
 DROP_COLS = [
     "subscriber_id", "monthly_revenue", "churned_next_30d",
-    # Phase 4c uplift-experiment columns: not features, hold aside for
+    # Phase 8 uplift-experiment columns: not features, hold aside for
     # uplift training / evaluation only.
     "treated", "treatment_lever", "churned_if_treated",
     "y_observed", "true_uplift",
@@ -167,45 +166,6 @@ def train_hist_gbm(X_train: pd.DataFrame,
         random_state=random_state,
     )
     model.fit(X_train, y_train)
-    return model
-
-
-def train_lightgbm(X_train: pd.DataFrame,
-                   y_train: pd.Series,
-                   random_state: int = 42):
-    """LightGBM -- alternative gradient boosting library. Import is lazy
-    so lightgbm is an optional dependency (not needed in CI).
-
-    On Windows we've seen intermittent C++-side access violations when
-    LightGBM's Dataset object receives mixed-dtype pandas frames. Convert
-    X to float32 and y to int32 numpy arrays before the fit call, and
-    use single-threaded training to sidestep OpenMP DLL conflicts.
-    """
-    try:
-        from lightgbm import LGBMClassifier
-    except ImportError:
-        raise ImportError(
-            "LightGBM not installed. `pip install lightgbm` to enable this "
-            "model in the bake-off, or skip this trainer."
-        )
-    X_arr = np.asarray(X_train, dtype=np.float32)
-    y_arr = np.asarray(y_train, dtype=np.int32)
-
-    model = LGBMClassifier(
-        n_estimators=300,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.85,
-        colsample_bytree=0.85,
-        min_child_samples=20,
-        reg_lambda=1.0,
-        objective="binary",
-        random_state=random_state,
-        n_jobs=1,
-        verbosity=-1,
-    )
-    X_arr_df = pd.DataFrame(X_arr, columns=list(X_train.columns))
-    model.fit(X_arr_df, y_arr)
     return model
 
 

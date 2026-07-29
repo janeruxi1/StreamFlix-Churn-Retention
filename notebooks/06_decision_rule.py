@@ -1,29 +1,51 @@
-"""
-Phase 6 -- Cost-Aware Decision Rule + ROI Sweep
-==================================================
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.16.0
+# ---
 
-Model probabilities + intervention menu + LTV -> per-user targeting
-decisions with a budget cap. Then compare against the blanket $5
-credit campaign the retention team runs today.
+# %% [markdown]
+# # Phase 6 — Cost-Aware Decision Rule + ROI Sweep
+#
+# Model probabilities + intervention menu + LTV → **per-user targeting decisions with a
+# budget cap**. Then compare against the blanket $5 credit campaign the retention team
+# runs today.
+#
+# ## Sections
+#
+# | Section | Purpose |
+# |---|---|
+# | **A. Setup** | Load model, score all subscribers |
+# | **B. Assumptions** | Intervention menu, LTV, cost, uplift |
+# | **C. Per-lever EV** | Compute EV for each lever, per user |
+# | **D. Best-lever selection** | Argmax over levers |
+# | **E. Budget cap** | Apply $200k cap + policy summary |
+# | **F. Baseline comparison** | Head-to-head vs blanket $5 credit at m11 |
+# | **G. ROI sweep** | Revenue / cost / net-EV across 25 budget levels |
+# | **H. Sensitivity** | Uplift assumption robustness |
+# | **I. Verdict** | Handoff to Phase 7 (memo + Streamlit app) |
+#
+# All figures saved under `reports/figures/`.
 
-Sections:
-    A. Setup: load model, score all subscribers
-    B. Assumptions: intervention menu, LTV, cost, uplift
-    C. Compute EV for each lever per user
-    D. Pick best lever, apply premium-upgrade cap
-    E. Apply budget cap ($200k) + policy summary
-    F. Baseline comparison vs blanket $5 credit at m11
-    G. ROI sweep across budget levels
-    H. Sensitivity analysis on uplift assumptions
-    I. Verdict + Phase 7 handoff
-
-All figures saved under reports/figures/.
-"""
+# %%
+import os
 import sys
 import pickle
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Run from project root whether invoked as `python notebooks/06_...` or
+# from a Jupyter cell (which doesn't define __file__).
+try:
+    _project_root = Path(__file__).resolve().parents[1]
+except NameError:
+    _here = Path.cwd()
+    _project_root = _here.parent if _here.name == "notebooks" else _here
+os.chdir(_project_root)
+sys.path.insert(0, str(_project_root))
 
 import numpy as np
 import pandas as pd
@@ -32,6 +54,7 @@ import matplotlib.pyplot as plt
 from src.data.loader import load_subscribers
 from src.features.transforms import build_features
 from src.models.train import prepare_features
+from src.models.production import load_production_churn_model
 from src.decisions.policy import (
     INTERVENTION_MENU, LTV_BY_TIER, PREMIUM_UPGRADE_CAP_PCT,
     score_all_levers, pick_best_lever, apply_budget_cap,
@@ -42,9 +65,10 @@ FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# =====================================================================
-# A. Setup: score every subscriber with the calibrated model
-# =====================================================================
+# %% [markdown]
+# ## A. Setup — score every subscriber with the calibrated model
+
+# %%
 print("=" * 70)
 print("A. SETUP")
 print("=" * 70)
@@ -53,9 +77,9 @@ raw = load_subscribers("data/subscribers.csv")
 df = build_features(raw)
 X, y = prepare_features(df)
 
-with open("models/churn_model_v1.pkl", "rb") as f:
-    artifact = pickle.load(f)
-model = artifact["production_model"]
+# Load via src/models/production.py so we're guaranteed to be reading
+# the same artifact Phase 4 wrote and Streamlit also reads from.
+model, artifact = load_production_churn_model()
 feature_names = artifact["feature_names"]
 
 # Align feature order to what the model was trained on
@@ -73,9 +97,13 @@ print(f"LTV distribution     -- mean=${ltv.mean():.0f}, "
       f"min=${ltv.min():.0f}, max=${ltv.max():.0f}")
 
 
-# =====================================================================
-# B. Assumptions
-# =====================================================================
+# %% [markdown]
+# ## B. Assumptions — intervention menu, LTV, uplift, guardrails
+#
+# All numbers curated with the PM (`reports/scenario_brief.md`). Uplifts are from the
+# PM's 2024 pilot; sensitivity in Section H sweeps ±50%.
+
+# %%
 print("\n" + "=" * 70)
 print("B. ASSUMPTIONS")
 print("=" * 70)
@@ -91,9 +119,14 @@ for tier, v in LTV_BY_TIER.items():
 print(f"\nPremium upgrade cap: {PREMIUM_UPGRADE_CAP_PCT:.0%} of base")
 
 
-# =====================================================================
-# C. Compute EV per lever per user
-# =====================================================================
+# %% [markdown]
+# ## C. Expected value per lever, per user
+#
+# For each of the 50K subscribers × 3 levers, compute
+# `EV = P(churn) × uplift × LTV − cost`. Wide-format matrix that Section D reduces to
+# best-lever-per-user.
+
+# %%
 print("\n" + "=" * 70)
 print("C. EV PER LEVER PER USER")
 print("=" * 70)
@@ -102,9 +135,14 @@ print("\nEV summary across all users:")
 print(ev_wide.describe().T[["mean", "50%", "max"]].round(2))
 
 
-# =====================================================================
-# D. Pick best lever + apply premium cap
-# =====================================================================
+# %% [markdown]
+# ## D. Best-lever selection
+#
+# `argmax` over levers per user. Users with all-negative EVs get `best_lever = "none"`
+# (skip the intervention entirely). Distribution shows how many users route to each
+# lever before the budget cap is applied.
+
+# %%
 print("\n" + "=" * 70)
 print("D. BEST-LEVER SELECTION")
 print("=" * 70)
@@ -113,9 +151,14 @@ print("\nBest-lever distribution (before budget cap):")
 print(policy["best_lever"].value_counts().to_string())
 
 
-# =====================================================================
-# E. Budget cap ($200k) + summary
-# =====================================================================
+# %% [markdown]
+# ## E. Budget cap ($200k) + policy summary
+#
+# Sort actionable users by EV descending, cumulative-cost cutoff at the budget line, and
+# also apply the **5% premium-upgrade cap** (guardrail: can't offer too many free-tier
+# upgrades without margin compression).
+
+# %%
 print("\n" + "=" * 70)
 print("E. BUDGET CAP + SUMMARY")
 print("=" * 70)
@@ -139,9 +182,14 @@ print(f"  Net expected value:        ${summary['net_expected_value']:>12,.0f}")
 print(f"  ROI multiplier:           {summary['roi_multiplier']:>12.2f}x")
 
 
-# =====================================================================
-# F. Baseline comparison: blanket $5 credit at m11
-# =====================================================================
+# %% [markdown]
+# ## F. Baseline comparison — blanket $5 credit at month 11
+#
+# This is what the retention team runs today: contact every user at tenure = 11 months
+# with a $5 credit, regardless of predicted churn. Simulate it under the same LTV +
+# uplift assumptions so the two policies are directly comparable.
+
+# %%
 print("\n" + "=" * 70)
 print("F. BASELINE: BLANKET $5 CREDIT AT MONTH-11")
 print("=" * 70)
@@ -176,9 +224,14 @@ head_to_head = pd.DataFrame({
 print(head_to_head)
 
 
-# =====================================================================
-# G. ROI sweep across budget levels
-# =====================================================================
+# %% [markdown]
+# ## G. ROI sweep across budget levels
+#
+# 25 budget levels from $10k to $500k. Two things worth watching: (1) net EV plateaus
+# fast once we've picked the ~3% of high-EV users, (2) ROI **decays** as budget grows
+# because we start targeting weaker candidates.
+
+# %%
 print("\n" + "=" * 70)
 print("G. ROI SWEEP")
 print("=" * 70)
@@ -254,14 +307,18 @@ sweep_display["roi"] = sweep_display["roi"].map("{:.2f}x".format)
 print(sweep_display.to_string(index=False))
 
 
-# =====================================================================
-# H. Sensitivity: uplift assumptions
-# =====================================================================
+# %% [markdown]
+# ## H. Sensitivity — uplift assumption robustness
+#
+# The uplift numbers are PM assumptions, not measured. Sweep ±50% and check whether the
+# recommendation direction survives. If it does at 0.5×, we're not blocked on running
+# the A/B experiment first. (Phase 8 *does* run that experiment and replaces the
+# assumption with a learned per-user uplift.)
+
+# %%
 print("\n" + "=" * 70)
 print("H. SENSITIVITY: UPLIFT ASSUMPTIONS")
 print("=" * 70)
-# The uplift numbers are PM assumptions, not measured. Sweep +/- 50%
-# to show whether the recommendation is robust.
 uplift_scales = [0.5, 0.75, 1.0, 1.25, 1.5]
 sens_rows = []
 for scale in uplift_scales:
@@ -302,9 +359,10 @@ plt.savefig(FIG_DIR / "06_uplift_sensitivity.png", dpi=140, bbox_inches="tight")
 print(f"\nSaved -> {FIG_DIR}/06_uplift_sensitivity.png")
 
 
-# =====================================================================
-# I. Verdict + handoff to Phase 7
-# =====================================================================
+# %% [markdown]
+# ## I. Verdict + handoff to Phase 7
+
+# %%
 print("\n" + "=" * 70)
 print("I. PHASE 6 VERDICT")
 print("=" * 70)
@@ -320,10 +378,10 @@ print(f"Baseline ROI: {baseline['roi_multiplier']:.2f}x")
 print(f"\nReady for Phase 7 (decision memo + Streamlit app).")
 
 
-# =====================================================================
-# =====================================================================
-# Design choices worth noting
-# =====================================================================
+# %% [markdown]
+# ## Design choices worth noting
+
+# %%
 print("\n" + "=" * 70)
 print("DESIGN CHOICES WORTH NOTING")
 print("=" * 70)
@@ -342,9 +400,10 @@ print("""
 """)
 
 
-# =====================================================================
-# Findings worth flagging (for the Phase 7 memo)
-# =====================================================================
+# %% [markdown]
+# ## Findings worth flagging (for the Phase 7 memo)
+
+# %%
 print("\n" + "=" * 70)
 print("FINDINGS WORTH FLAGGING")
 print("=" * 70)

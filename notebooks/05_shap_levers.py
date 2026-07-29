@@ -1,33 +1,55 @@
-"""
-Phase 5 -- SHAP Explainability + Retention Levers
-====================================================
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.16.0
+# ---
 
-Goal: turn the churn model from a black box into a decision-support tool.
-For each flagged subscriber, we explain WHY the model flagged them AND
-which retention lever the PM should pull.
+# %% [markdown]
+# # Phase 5 — SHAP Explainability + Retention Levers
+#
+# **Goal:** turn the churn model from a black box into a decision-support tool. For each
+# flagged subscriber, we explain **why** the model flagged them AND **which retention
+# lever** the PM should pull.
+#
+# **Two audiences:**
+# - **Data science** — proper SHAP methodology (TreeExplainer, log-odds space, global vs
+#   local, ranked importance)
+# - **Product** — feature → intervention mapping curated with the PM, three worked
+#   examples showing *"flag + why + what to do"*
+#
+# ## Sections
+#
+# | Section | Purpose |
+# |---|---|
+# | **A. Setup** | Load features, retrain uncalibrated XGB (SHAP needs the raw booster) |
+# | **B. Compute SHAP** | TreeExplainer on a 2K test sample |
+# | **C. Global importance** | Mean-abs-SHAP ranked feature table + bar chart |
+# | **D. Beeswarm** | Direction + magnitude across the sample |
+# | **E. Dependence** | How SHAP shifts with feature value for the top 3 drivers |
+# | **F. Local explanations** | Three worked examples: HIGH / MARGINAL / LOW risk |
+# | **G. Intervention map** | Feature → lever + cost lookup table |
+# | **H. Verdict** | Handoff to Phase 6 decision rule |
+#
+# All figures saved under `reports/figures/`.
 
-Two audiences:
-    - Data science: proper SHAP methodology (TreeExplainer, log-odds,
-      global vs local, ranked importance)
-    - Product: feature -> intervention mapping (curated with the PM),
-      three worked examples showing 'flag + why + what to do'
-
-Sections:
-    A. Setup -- load features, retrain XGB for SHAP (uncalibrated)
-    B. Compute SHAP values (TreeExplainer)
-    C. Global feature importance (mean |SHAP|)
-    D. SHAP summary plot (beeswarm) -- direction + magnitude
-    E. Feature dependence for top 3 drivers
-    F. Local explanations -- three worked examples
-    G. Feature -> intervention mapping table
-    H. Verdict + handoff to Phase 6
-
-All figures saved under reports/figures/.
-"""
+# %%
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Run from project root whether invoked as `python notebooks/05_...` or
+# from a Jupyter cell (which doesn't define __file__).
+try:
+    _project_root = Path(__file__).resolve().parents[1]
+except NameError:
+    _here = Path.cwd()
+    _project_root = _here.parent if _here.name == "notebooks" else _here
+os.chdir(_project_root)
+sys.path.insert(0, str(_project_root))
 
 import numpy as np
 import pandas as pd
@@ -46,9 +68,15 @@ from src.models.explain import (
 FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# =====================================================================
-# A. Setup
-# =====================================================================
+# %% [markdown]
+# ## A. Setup — retrain uncalibrated XGB for SHAP
+#
+# The calibrated model runs in production for probabilities; this uncalibrated version
+# is what runs SHAP because TreeExplainer needs direct access to the booster's tree
+# structure. Same three-way split as Phase 4 (same seed) so we're explaining the same
+# model on the same test users.
+
+# %%
 print("=" * 70)
 print("A. SETUP -- load model + test features")
 print("=" * 70)
@@ -73,14 +101,17 @@ xgb = train_xgboost(X_train, y_train)
 print(f"Retrained XGBoost on train (n={len(X_train):,}) for SHAP analysis")
 
 
-# =====================================================================
-# B. Compute SHAP values
-# =====================================================================
+# %% [markdown]
+# ## B. Compute SHAP values (TreeExplainer)
+#
+# Sample 2,000 test users — SHAP over the full test set is unnecessary and slow. Global
+# patterns show up cleanly at n=2000. Sanity-check that
+# `sum(SHAP) + base_value == raw model margin`.
+
+# %%
 print("\n" + "=" * 70)
 print("B. COMPUTE SHAP VALUES (TreeExplainer)")
 print("=" * 70)
-# Sample 2000 test users -- SHAP over the full test set is unnecessary
-# and slow. Global patterns show up cleanly at n=2000.
 SAMPLE_SIZE = 2000
 shap_values = compute_shap_values(xgb, X_test, sample_size=SAMPLE_SIZE)
 X_shap = X_test.sample(n=SAMPLE_SIZE, random_state=42)
@@ -95,9 +126,13 @@ print(f"Sanity check (should match): raw margin={sample_pred:.4f}, "
       f"sum(shap)+base={sample_check:.4f}")
 
 
-# =====================================================================
-# C. Global feature importance
-# =====================================================================
+# %% [markdown]
+# ## C. Global feature importance — mean |SHAP|
+#
+# Ranked feature contribution to the model's log-odds output. Bar-chart color encodes
+# average direction: red bars push toward churn, green push away.
+
+# %%
 print("\n" + "=" * 70)
 print("C. GLOBAL FEATURE IMPORTANCE (mean |SHAP|)")
 print("=" * 70)
@@ -121,15 +156,17 @@ plt.savefig(FIG_DIR / "05_shap_global_importance.png",
 print(f"\nSaved -> {FIG_DIR}/05_shap_global_importance.png")
 
 
-# =====================================================================
-# D. SHAP summary plot (beeswarm)
-# =====================================================================
+# %% [markdown]
+# ## D. SHAP summary plot (beeswarm)
+#
+# One row per feature, one dot per user. X-position = SHAP contribution, color = feature
+# value (red high, blue low). Shows **both magnitude and direction** of effect across
+# the sample in one image.
+
+# %%
 print("\n" + "=" * 70)
 print("D. SHAP SUMMARY PLOT (beeswarm)")
 print("=" * 70)
-# Beeswarm: one row per feature, one dot per user, x-position = SHAP,
-# color = feature value (red high, blue low). Shows BOTH magnitude AND
-# direction of effect across the sample.
 plt.figure(figsize=(11, 8))
 shap.summary_plot(shap_values, X_shap, max_display=15, show=False,
                   plot_size=None)
@@ -141,9 +178,13 @@ plt.close()
 print(f"Saved -> {FIG_DIR}/05_shap_beeswarm.png")
 
 
-# =====================================================================
-# E. Feature dependence for top 3 drivers
-# =====================================================================
+# %% [markdown]
+# ## E. Feature dependence for top 3 drivers
+#
+# Scatter of feature value (x) vs SHAP contribution (y) for the three most important
+# features. Reveals thresholds and non-linearities the tree learned.
+
+# %%
 print("\n" + "=" * 70)
 print("E. FEATURE DEPENDENCE (top 3 drivers)")
 print("=" * 70)
@@ -170,9 +211,14 @@ for feat in top_3:
     print(f"  - {feat}")
 
 
-# =====================================================================
-# F. Local explanations -- three worked examples
-# =====================================================================
+# %% [markdown]
+# ## F. Local explanations — three worked examples
+#
+# Pick one user at each risk tier (highest, marginal, lowest) and walk through the top
+# SHAP contributions. Attach the recommended intervention for the top `RISK+` feature.
+# This is the pattern the Streamlit app uses in the Per-user lookup tab.
+
+# %%
 print("\n" + "=" * 70)
 print("F. LOCAL EXPLANATIONS -- three worked examples")
 print("=" * 70)
@@ -205,13 +251,17 @@ for label, idx in example_indices:
         print(f"  Reason: {lever['note']}")
 
 
-# =====================================================================
-# G. Feature -> intervention mapping table
-# =====================================================================
+# %% [markdown]
+# ## G. Feature → intervention mapping table
+#
+# The bridge between model and decision rule. Every flagged feature has a paired lever
+# (or "no lever" if the feature is diagnostic-only). This mapping was curated with the
+# PM and lives in `src/models/explain.py:FEATURE_INTERVENTION_MAP`.
+
+# %%
 print("\n" + "=" * 70)
 print("G. FEATURE -> INTERVENTION MAPPING")
 print("=" * 70)
-# This is the bridge between model and decision rule.
 lever_rows = []
 for feat, spec in FEATURE_INTERVENTION_MAP.items():
     lever_rows.append({
@@ -224,9 +274,14 @@ lever_df = pd.DataFrame(lever_rows)
 print(lever_df.to_string(index=False))
 
 
-# =====================================================================
-# H. Verdict + Phase 6 handoff
-# =====================================================================
+# %% [markdown]
+# ## H. Verdict + handoff to Phase 6
+#
+# Roll up the top drivers, count how many have actionable levers, and describe what
+# Phase 6 will consume: per-user P(churn), top SHAP driver, lever cost, lever uplift,
+# LTV by tier.
+
+# %%
 print("\n" + "=" * 70)
 print("H. PHASE 5 VERDICT")
 print("=" * 70)

@@ -1,26 +1,48 @@
-"""
-Phase 7 -- Hero figure
-========================
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.16.0
+# ---
 
-One PNG that summarizes the whole project. This is what goes at the
-top of the README and what the PM sees first when opening the decision
-memo. It has to answer three questions at a glance:
+# %% [markdown]
+# # Phase 7 — Hero Figure
+#
+# One PNG that summarizes the whole project. This is what goes at the top of the README
+# and what the PM sees first when opening the decision memo. It has to answer three
+# questions at a glance:
+#
+# 1. **What's the current state?** — blanket campaign losing money
+# 2. **What are we recommending?** — targeted policy
+# 3. **What's the payoff?** — net swing of ~$9.6k / month
+#
+# ## Design principles for a hero figure
+#
+# - **Single takeaway** — don't try to show every metric
+# - **Clear before/after** — same units, same axes, side by side
+# - **Numbers on the bars** — readable without the legend
+# - **Muted colors for status quo, bright color for the recommendation**
+#
+# Output: `reports/figures/07_hero_summary.png`.
 
-    1. What's the current state?  (blanket campaign losing money)
-    2. What are we recommending?  (targeted policy)
-    3. What's the payoff?         (net swing of ~$9.6k / month)
-
-Design principles for a hero figure:
-    - Single takeaway; don't try to show every metric
-    - Clear before/after
-    - Numbers on the bars so it can be read without a legend
-    - Muted colors for status quo, bright color for recommendation
-"""
+# %%
+import os
 import sys
 import pickle
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Run from project root whether invoked as `python notebooks/07_...` or
+# from a Jupyter cell (which doesn't define __file__).
+try:
+    _project_root = Path(__file__).resolve().parents[1]
+except NameError:
+    _here = Path.cwd()
+    _project_root = _here.parent if _here.name == "notebooks" else _here
+os.chdir(_project_root)
+sys.path.insert(0, str(_project_root))
 
 import numpy as np
 import pandas as pd
@@ -29,6 +51,7 @@ import matplotlib.pyplot as plt
 from src.data.loader import load_subscribers
 from src.features.transforms import build_features
 from src.models.train import prepare_features
+from src.models.production import load_production_churn_model
 from src.decisions.policy import (
     INTERVENTION_MENU, LTV_BY_TIER, PREMIUM_UPGRADE_CAP_PCT,
     pick_best_lever, apply_budget_cap, apply_premium_cap,
@@ -38,14 +61,19 @@ from src.decisions.policy import (
 FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- Compute the two policies -------------------------------------------
+# %% [markdown]
+# ## Compute the two policies
+#
+# Re-runs the Phase 6 policies (blanket baseline + $200k targeted) so the hero figure
+# always reflects the current model + assumptions.
+
+# %%
 raw = load_subscribers("data/subscribers.csv")
 df = build_features(raw)
 X, y = prepare_features(df)
 
-with open("models/churn_model_v1.pkl", "rb") as f:
-    artifact = pickle.load(f)
-model = artifact["production_model"]
+# Load via src/models/production.py -- same artifact as Streamlit + Phase 6.
+model, artifact = load_production_churn_model()
 X = X[artifact["feature_names"]]
 
 p_churn = model.predict_proba(X)[:, 1]
@@ -66,7 +94,13 @@ policy = apply_premium_cap(policy, n_total=len(policy),
 targeted = summarize_policy(policy, targeted_only=True)
 
 
-# --- Build the hero figure ----------------------------------------------
+# %% [markdown]
+# ## Build the hero figure
+#
+# Two panels: **left** = net EV comparison with the monthly swing annotated;
+# **right** = component breakdown (users contacted, cost, retained revenue, net EV).
+
+# %%
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6),
                                 gridspec_kw={"width_ratios": [1.2, 1]})
 

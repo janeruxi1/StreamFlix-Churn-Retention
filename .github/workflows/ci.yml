@@ -28,7 +28,9 @@ jobs:
           python -m pip install --upgrade pip
           # Skip heavy deps (shap/lifelines/streamlit) -- not needed for the
           # test suite; they're covered by the notebooks locally.
-          pip install pandas numpy scipy scikit-learn xgboost pytest
+          # scikit-uplift IS required: test_uplift.py imports src.models.uplift
+          # which hard-imports sklift at module load time.
+          pip install pandas numpy scipy scikit-learn xgboost scikit-uplift pytest
 
       - name: Run tests
         run: pytest tests/ -v --tb=short

@@ -37,7 +37,7 @@ sklift convention: `P(Y=1 | T=1) - P(Y=1 | T=0)`.
 Design principles (same as train.py):
     - Stateless. All state is inside the returned model object.
     - scikit-uplift is a HARD dependency (unlike shap/mlflow). The
-      Phase 4c notebook needs it to run.
+      Phase 8 notebook needs it to run.
 """
 from __future__ import annotations
 

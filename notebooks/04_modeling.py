@@ -1,27 +1,57 @@
-"""
-Phase 4 -- Modeling: LR baseline -> XGBoost -> Calibration
-============================================================
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.16.0
+# ---
 
-Goal: produce a calibrated P(churn|features) the Phase 6 decision rule
-can multiply by LTV. Calibration is a first-class metric here, not an
-afterthought.
+# %% [markdown]
+# # Phase 4 — Production Modeling: LR baseline → XGBoost → Calibration
+#
+# **Goal:** produce a calibrated `P(churn | features)` that the Phase 6 decision rule can
+# multiply by LTV. Calibration is a first-class metric here, not an afterthought.
+#
+# The **XGBoost family choice is validated by Phase 4b's systematic bake-off**
+# (4 families + 25-trial Bayesian tuning). This notebook takes that winner and builds the
+# production-quality artifact: calibrated, evaluated on held-out data, persisted to
+# `models/churn_model_v1.pkl` for the Streamlit app and Phase 5-7 to consume.
+#
+# **Chronologically, Phase 4b's bake-off runs BEFORE this notebook** (family selection).
+# Phase 4 is numbered/presented first because it's the deployment story a PM or
+# engineering partner would open. Read them in either order.
+#
+# ## Sections
+#
+# | Section | Purpose |
+# |---|---|
+# | **A. Setup** | Load engineered data, prepare features, three-way split |
+# | **B. LR baseline** | Regularized logistic regression on the same features |
+# | **C. XGBoost (uncalibrated)** | Boosted trees, default hyperparams |
+# | **D. XGBoost + Platt calibration** | Sigmoid calibration on held-out calib set |
+# | **E. Discrimination curves** | PR + ROC overlay for all three models |
+# | **F. Calibration curves** | Reliability diagrams before vs after |
+# | **G. Top-K targeting** | Precision/recall at K% — direct input to Phase 6 |
+# | **H. Verdict + persistence** | Pick production model, save to `models/churn_model_v1.pkl` |
+#
+# All figures saved under `reports/figures/`.
 
-Sections:
-    A. Setup -- load engineered data, prepare features, three-way split
-    B. Logistic regression baseline
-    C. XGBoost (uncalibrated)
-    D. XGBoost + isotonic calibration
-    E. Discrimination metrics: PR / ROC curves overlay
-    F. Calibration: reliability diagrams before vs after
-    G. Top-K targeting analysis
-    H. Verdict + model persistence
-
-All figures saved under reports/figures/.
-"""
+# %%
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Run from project root whether invoked as `python notebooks/04_...` or
+# from a Jupyter cell (which doesn't define __file__).
+try:
+    _project_root = Path(__file__).resolve().parents[1]
+except NameError:
+    _here = Path.cwd()
+    _project_root = _here.parent if _here.name == "notebooks" else _here
+os.chdir(_project_root)
+sys.path.insert(0, str(_project_root))
 
 import pickle
 import numpy as np
@@ -41,7 +71,10 @@ from src.models.train import (
 from src.models.evaluate import (
     compute_metrics, top_k_metrics, calibration_curve_points,
 )
-from src.models.tracking import mlflow_run
+from src.models.tracking import mlflow_run, register_production_model
+from src.models.production import (
+    CHURN_MODEL_PATH, CHURN_MODEL_ARTIFACT_KEY, CHURN_MODEL_REGISTRY_NAME,
+)
 
 FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,9 +82,10 @@ MODEL_DIR = Path("models")
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# =====================================================================
-# A. Setup
-# =====================================================================
+# %% [markdown]
+# ## A. Setup — load, prepare features, three-way split
+
+# %%
 print("=" * 70)
 print("A. SETUP")
 print("=" * 70)
@@ -76,13 +110,14 @@ print(f"  calib: n={len(X_calib):,}  positive_rate={y_calib.mean():.4f}")
 print(f"  test:  n={len(X_test):,}  positive_rate={y_test.mean():.4f}")
 
 
-# =====================================================================
-# B. Logistic regression baseline
-# =====================================================================
-# Every model variant is wrapped in an MLflow run so we can compare
-# runs in the tracking UI (`mlflow ui` -> localhost:5000). If MLflow
-# isn't installed, mlflow_run() no-ops and we fall through to the
-# untracked path -- keeps CI lightweight.
+# %% [markdown]
+# ## B. Logistic regression baseline
+#
+# Every model variant is wrapped in an MLflow run so we can compare runs in the tracking
+# UI (`mlflow ui` → localhost:5000). If MLflow isn't installed, `mlflow_run()` no-ops
+# and we fall through to the untracked path — keeps CI lightweight.
+
+# %%
 print("\n" + "=" * 70)
 print("B. LOGISTIC REGRESSION BASELINE")
 print("=" * 70)
@@ -104,9 +139,10 @@ for k, v in lr_metrics.items():
     print(f"  {k:<10} {v:.4f}")
 
 
-# =====================================================================
-# C. XGBoost (uncalibrated)
-# =====================================================================
+# %% [markdown]
+# ## C. XGBoost (uncalibrated)
+
+# %%
 print("\n" + "=" * 70)
 print("C. XGBOOST (UNCALIBRATED)")
 print("=" * 70)
@@ -130,20 +166,22 @@ for k, v in xgb_metrics.items():
     print(f"  {k:<10} {v:.4f}")
 
 
-# =====================================================================
-# D. XGBoost + isotonic calibration
-# =====================================================================
+# %% [markdown]
+# ## D. XGBoost + Platt (sigmoid) calibration
+#
+# **Platt over isotonic:** monotonic transform preserves ranking metrics (PR-AUC and
+# ROC-AUC are invariant under monotonic transforms). Isotonic is more flexible but
+# creates probability ties that hurt ranking on small positive classes.
+
+# %%
 print("\n" + "=" * 70)
 print("D. XGBOOST + PLATT (SIGMOID) CALIBRATION")
 print("=" * 70)
-# Platt (sigmoid) over isotonic: monotonic transform preserves ranking
-# metrics (PR-AUC, ROC-AUC are invariant under monotonic transforms).
-# Isotonic is more flexible but creates probability ties that hurt
-# ranking on small positive classes.
 with mlflow_run("xgboost_calibrated") as run:
     xgb_cal = calibrate_xgboost(xgb, X_calib, y_calib, method="sigmoid")
     xgb_cal_proba_test = xgb_cal.predict_proba(X_test)[:, 1]
     xgb_cal_metrics = compute_metrics(y_test, xgb_cal_proba_test)
+    winner_run_id = None
     if run is not None:
         run.log_params({
             "model_type": "xgboost_calibrated",
@@ -153,6 +191,17 @@ with mlflow_run("xgboost_calibrated") as run:
         })
         run.log_metrics(xgb_cal_metrics)
         run.log_model(xgb_cal, name="model")
+        # Capture the run ID WHILE the run is active -- needed below for
+        # the Registry promotion (mlflow.active_run() returns None after
+        # the `with` block exits).
+        winner_run_id = run.run_id
+
+# Promote the calibrated XGBoost to the MLflow Model Registry as the new
+# production version. Registers under a stable logical name so downstream
+# jobs can load `models:/streamflix_churn_production@production` without
+# hardcoding a run ID. Runs OUTSIDE the mlflow_run context (Registry API
+# operates on past runs by ID). Silently no-ops if MLflow isn't installed.
+register_production_model(winner_run_id, CHURN_MODEL_REGISTRY_NAME)
 print("Metrics on test set:")
 for k, v in xgb_cal_metrics.items():
     print(f"  {k:<10} {v:.4f}")
@@ -169,9 +218,13 @@ comparison = pd.DataFrame({
 print(comparison)
 
 
-# =====================================================================
-# E. Discrimination curves: PR + ROC overlay
-# =====================================================================
+# %% [markdown]
+# ## E. Discrimination curves — PR + ROC overlay
+#
+# PR-AUC is the primary metric (5% positive class); ROC-AUC is the lingua franca for
+# comparison against published benchmarks.
+
+# %%
 print("\n" + "=" * 70)
 print("E. DISCRIMINATION CURVES")
 print("=" * 70)
@@ -225,9 +278,14 @@ plt.savefig(FIG_DIR / "04_discrimination_curves.png", dpi=140, bbox_inches="tigh
 print(f"Saved -> {FIG_DIR}/04_discrimination_curves.png")
 
 
-# =====================================================================
-# F. Calibration: reliability diagrams
-# =====================================================================
+# %% [markdown]
+# ## F. Calibration curves — reliability diagrams
+#
+# Does `P(churn) = 0.20` really mean 20% of those users churn? The reliability diagram
+# uses quantile bins (equal-population, not equal-width — critical for imbalanced classes
+# where equal-width bins are mostly empty).
+
+# %%
 print("\n" + "=" * 70)
 print("F. CALIBRATION CURVES (reliability diagrams)")
 print("=" * 70)
@@ -260,15 +318,17 @@ for name, proba, _ in models:
     print(f"  {name:<25} {bs:>10.4f} {ll:>10.4f}")
 
 
-# =====================================================================
-# G. Top-K targeting analysis
-# =====================================================================
+# %% [markdown]
+# ## G. Top-K targeting analysis
+#
+# Maps to the decision rule: *"if Retention can only contact K% of users, what fraction
+# reached are real churners (precision), and what fraction of actual churners do we
+# catch (recall)?"* Direct input to Phase 6.
+
+# %%
 print("\n" + "=" * 70)
 print("G. TOP-K TARGETING ANALYSIS")
 print("=" * 70)
-# Maps to the decision rule: 'if Retention can only contact K% of users,
-# what fraction reached are real churners (precision), and what fraction
-# of actual churners do we catch (recall)?'
 print(f"\nUsing best model: XGBoost calibrated (test n={len(y_test):,})")
 k_values = [0.05, 0.10, 0.20, 0.30, 0.50]
 rows = []
@@ -310,9 +370,15 @@ plt.savefig(FIG_DIR / "04_top_k_targeting.png", dpi=140, bbox_inches="tight")
 print(f"\nSaved -> {FIG_DIR}/04_top_k_targeting.png")
 
 
-# =====================================================================
-# H. Verdict + model persistence
-# =====================================================================
+# %% [markdown]
+# ## H. Verdict + model persistence
+#
+# Both models (LR baseline + calibrated XGBoost) are pickled into
+# `models/churn_model_v1.pkl`. LR sits in the `baseline_model` slot as a documented
+# sanity check; calibrated XGBoost is the `production_model` that the Streamlit app
+# and Phase 5-7 load.
+
+# %%
 print("\n" + "=" * 70)
 print("H. VERDICT + MODEL PERSISTENCE")
 print("=" * 70)
@@ -344,10 +410,12 @@ print(f"  PR-AUC:  {lr_metrics['pr_auc']:.4f}")
 print(f"  ROC-AUC: {lr_metrics['roc_auc']:.4f}")
 print(f"  Brier:   {lr_metrics['brier']:.4f}")
 
+# Persist to the path declared in src/models/production.py so the
+# Streamlit app + Phase 5-7 notebooks load exactly this artifact.
 artifact = {
-    "production_model": xgb_cal,
-    "baseline_model":   lr,
-    "feature_names":    list(X.columns),
+    CHURN_MODEL_ARTIFACT_KEY: xgb_cal,   # <- key that Streamlit + notebooks read
+    "baseline_model":         lr,
+    "feature_names":          list(X.columns),
     "metrics": {
         "production": xgb_cal_metrics,
         "baseline":   lr_metrics,
@@ -359,8 +427,9 @@ artifact = {
         "positive_rate": float(y.mean()),
     },
 }
-model_path = MODEL_DIR / "churn_model_v1.pkl"
-with open(model_path, "wb") as f:
+CHURN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+with open(CHURN_MODEL_PATH, "wb") as f:
     pickle.dump(artifact, f)
-print(f"\nSaved -> {model_path}")
+print(f"\nSaved -> {CHURN_MODEL_PATH}")
+print(f"Registered as -> {CHURN_MODEL_REGISTRY_NAME}@production (via MLflow Registry)")
 print(f"\nReady for Phase 5 (SHAP -- actionable retention levers).")

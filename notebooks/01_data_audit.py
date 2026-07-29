@@ -1,26 +1,47 @@
-"""
-Phase 1 audit -- Data Profiling & Realism Verification
-=======================================================
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.16.0
+# ---
 
-Validates the synthetic StreamFlix subscriber dataset BEFORE any modeling.
-Mirrors the Project #1 'data quality' phase: if the data has structural
-issues, fix them here rather than discovering them in modeling.
+# %% [markdown]
+# # Phase 1 — Data Profiling & Realism Verification
+#
+# Validates the synthetic StreamFlix subscriber dataset **before** any modeling. If the
+# data has structural issues, fix them here rather than discovering them mid-modeling.
+#
+# ## Sections
+#
+# | Section | Check |
+# |---|---|
+# | **A. Schema integrity** | Nulls, duplicate IDs, memory footprint |
+# | **B. Distribution profiles** | Engagement, tickets, payments, revenue |
+# | **C. Nested-counts math** | Verify Poisson-thinning windows (7d ≤ 30d ≤ 90d) |
+# | **D. Engagement cohort** | Bimodal split + heavy/casual realism check |
+# | **E. Tenure spikes** | Verify m2 (trial drop) and m12 (anniversary) elevated churn |
+# | **F. Univariate signal** | Correlation-based feature screen |
+# | **G. Verdict** | Data ready for Phase 2? |
+#
+# All figures saved under `reports/figures/`.
 
-Sections:
-    A. Schema integrity check
-    B. Distribution profiles for engagement / tickets / payments
-    C. Multi-window nested-counts verification (Poisson thinning math)
-    D. Bimodal engagement cohort split + realism check
-    E. Tenure-spike verification (m2, m12)
-    F. Univariate churn signal screen
-    G. Verdict -- data ready for Phase 2?
-
-All figures saved under reports/figures/.
-"""
+# %%
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Run from project root whether invoked as `python notebooks/01_...` or
+# from a Jupyter cell (which doesn't define __file__).
+try:
+    _project_root = Path(__file__).resolve().parents[1]
+except NameError:
+    _here = Path.cwd()
+    _project_root = _here.parent if _here.name == "notebooks" else _here
+os.chdir(_project_root)
+sys.path.insert(0, str(_project_root))
 
 import numpy as np
 import pandas as pd
@@ -34,9 +55,10 @@ FIG_DIR.mkdir(parents=True, exist_ok=True)
 df = load_subscribers("data/subscribers.csv")
 
 
-# =====================================================================
-# A. Schema integrity
-# =====================================================================
+# %% [markdown]
+# ## A. Schema integrity — nulls, duplicate IDs, memory
+
+# %%
 print("=" * 70)
 print("A. SCHEMA INTEGRITY")
 print("=" * 70)
@@ -56,9 +78,13 @@ print(f"Duplicate subscriber IDs: {dup_ids}  "
       f"{'PASS' if dup_ids == 0 else 'FAIL'}")
 
 
-# =====================================================================
-# B. Distribution profiles
-# =====================================================================
+# %% [markdown]
+# ## B. Distribution profiles
+#
+# Summary stats + a grid of histograms so any weirdness (long tails, spikes at zero,
+# unexpected discreteness) is obvious at a glance.
+
+# %%
 print("\n" + "=" * 70)
 print("B. DISTRIBUTION PROFILES")
 print("=" * 70)
@@ -106,9 +132,13 @@ plt.savefig(FIG_DIR / "01_feature_distributions.png", dpi=140, bbox_inches="tigh
 print(f"Saved -> {FIG_DIR}/01_feature_distributions.png")
 
 
-# =====================================================================
-# C. Multi-window nested-counts verification
-# =====================================================================
+# %% [markdown]
+# ## C. Nested-counts math verification
+#
+# The simulator uses Poisson thinning so short-window counts must always ≤ long-window
+# counts. If any row violates this, the multi-window features are broken.
+
+# %%
 print("\n" + "=" * 70)
 print("C. NESTED-WINDOWS MATH (must hold: 7d <= 30d <= 90d, etc.)")
 print("=" * 70)
@@ -137,9 +167,13 @@ print(f"  watch_hours medians: "
       "(7d is per-week so smaller; 30d ~ 90d when trend=0)")
 
 
-# =====================================================================
-# D. Bimodal engagement cohort + realism check
-# =====================================================================
+# %% [markdown]
+# ## D. Engagement cohort realism
+#
+# Streaming products have a bimodal engagement distribution (heavy watchers + casual
+# dippers, thin middle). This section verifies our synthetic data produces that shape.
+
+# %%
 print("\n" + "=" * 70)
 print("D. ENGAGEMENT COHORT REALISM")
 print("=" * 70)
@@ -170,9 +204,13 @@ plt.savefig(FIG_DIR / "01_engagement_by_cohort.png", dpi=140, bbox_inches="tight
 print(f"Saved -> {FIG_DIR}/01_engagement_by_cohort.png")
 
 
-# =====================================================================
-# E. Tenure-spike verification
-# =====================================================================
+# %% [markdown]
+# ## E. Tenure-spike verification
+#
+# Verify the two churn spikes the PM brief calls out: **month 2** (post-trial drop) and
+# **month 12** (annual reassessment).
+
+# %%
 print("\n" + "=" * 70)
 print("E. TENURE SPIKE VERIFICATION (m2 trial drop, m12 anniversary)")
 print("=" * 70)
@@ -211,9 +249,13 @@ plt.savefig(FIG_DIR / "01_tenure_churn_curve.png", dpi=140, bbox_inches="tight")
 print(f"Saved -> {FIG_DIR}/01_tenure_churn_curve.png")
 
 
-# =====================================================================
-# F. Univariate churn signal screen
-# =====================================================================
+# %% [markdown]
+# ## F. Univariate churn signal screen
+#
+# Correlation with `churned_next_30d` for every candidate feature. Not a model — a
+# first-pass screen to see which features are worth engineering further in Phase 3.
+
+# %%
 print("\n" + "=" * 70)
 print("F. UNIVARIATE CHURN SIGNAL SCREEN")
 print("=" * 70)
@@ -274,9 +316,12 @@ plt.savefig(FIG_DIR / "01_univariate_correlations.png", dpi=140, bbox_inches="ti
 print(f"Saved -> {FIG_DIR}/01_univariate_correlations.png")
 
 
-# =====================================================================
-# G. Verdict
-# =====================================================================
+# %% [markdown]
+# ## G. Verdict — is the data ready for Phase 2?
+#
+# Roll-up of the 7 checks above. All must pass before proceeding to EDA + modeling.
+
+# %%
 print("\n" + "=" * 70)
 print("G. VERDICT -- DATA READY FOR PHASE 2?")
 print("=" * 70)

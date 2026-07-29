@@ -62,7 +62,7 @@ def top_k_metrics(y_true, y_proba, k: float = 0.10) -> Dict[str, float]:
 
 
 # ---------------------------------------------------------------------
-# Uplift-model evaluation (Phase 4c)
+# Uplift-model evaluation (Phase 8)
 # ---------------------------------------------------------------------
 def compute_uplift_metrics(y_true, uplift, treatment,
                            strategy: str = "overall") -> Dict[str, float]:

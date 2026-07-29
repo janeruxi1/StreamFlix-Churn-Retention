@@ -9,7 +9,7 @@
 # ---
 
 # %% [markdown]
-# # Phase 4c — Uplift (Causal) Modeling
+# # Phase 8 — Uplift (Causal) Modeling
 #
 # The Phase 4 churn model predicts `P(churn | user)`. The Phase 6 decision rule then
 # multiplies that by an **assumed uplift constant** (e.g., 15% for `credit_5`) to size
@@ -21,7 +21,7 @@
 #    their churn (reminds them to cancel). A propensity-only model can't spot these.
 #
 # Uplift modeling estimates the **causal treatment effect per user** directly from a
-# randomized experiment. In Phase 4c we:
+# randomized experiment. In Phase 8 we:
 #
 # - Train **four uplift meta-learners** (S-, T-, X-, ClassTransformation) on the
 #   `credit_5` lever using the experimental data the simulator now provides.
@@ -49,7 +49,7 @@ import sys
 import pickle
 from pathlib import Path
 
-# Run from project root whether invoked as `python notebooks/04c_...` or
+# Run from project root whether invoked as `python notebooks/08_...` or
 # from a Jupyter cell (which doesn't define __file__).
 try:
     _project_root = Path(__file__).resolve().parents[1]
@@ -64,7 +64,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
-from src.data.loader import load_subscribers
+from src.data.loader import load_subscribers_experiment
 from src.features.transforms import build_features
 from src.models.train import prepare_features
 from src.models.uplift import (
@@ -72,7 +72,11 @@ from src.models.uplift import (
     train_class_transformation, predict_uplift,
 )
 from src.models.evaluate import compute_uplift_metrics, qini_curve_points
-from src.models.tracking import mlflow_run
+from src.models.tracking import mlflow_run, register_production_model
+from src.models.production import (
+    UPLIFT_MODEL_PATH, UPLIFT_MODEL_ARTIFACT_KEY,
+    UPLIFT_MODEL_REGISTRY_NAME, UPLIFT_FOCUS_LEVER,
+)
 
 FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -81,7 +85,9 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # We focus this notebook on ONE lever (credit_5) so the uplift model has
 # a clean binary treatment. Multi-lever uplift is a v1.1 extension.
-FOCUS_LEVER = "credit_5"
+# Sourced from src/models/production.py so the lever choice, the pickle
+# path, and the Registry name all stay in sync.
+FOCUS_LEVER = UPLIFT_FOCUS_LEVER
 
 
 # %% [markdown]
@@ -92,7 +98,12 @@ print("=" * 70)
 print(f"A. SETUP (focus lever: {FOCUS_LEVER})")
 print("=" * 70)
 
-raw = load_subscribers("data/subscribers.csv")
+# Phase 8 uses the EXPERIMENT dataset (data/subscribers_experiment.csv),
+# not the baseline file that Phase 4-6 use. The extra 5 columns
+# (treated, treatment_lever, churned_if_treated, y_observed, true_uplift)
+# are what turns this into a causal-inference problem instead of a
+# propensity problem.
+raw = load_subscribers_experiment("data/subscribers_experiment.csv")
 df = build_features(raw)
 
 # Keep control users + treated users who got the FOCUS_LEVER
@@ -137,6 +148,7 @@ learners = {
 results = {}     # {name: metrics_dict}
 predictions = {} # {name: uplift_on_test}
 fitted = {}      # {name: model}
+run_ids = {}     # {name: mlflow_run_id} -- captured for Registry promotion below
 
 for name, trainer_fn in learners.items():
     with mlflow_run(f"uplift_{name}") as run:
@@ -156,6 +168,9 @@ for name, trainer_fn in learners.items():
                 run.log_model(model, name="uplift_model")
             except Exception as e:
                 print(f"  (model log skipped for {name}: {e})")
+            # Capture run_id WHILE the run is active. We use it after the
+            # winner is picked (Section C) to promote to the Registry.
+            run_ids[name] = run.run_id
     results[name] = metrics
     predictions[name] = u
     fitted[name] = model
@@ -199,8 +214,8 @@ ax.set_title(f"Qini curves — uplift bake-off on {FOCUS_LEVER}",
 ax.legend(loc="lower right", fontsize=9)
 ax.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.savefig(FIG_DIR / "04c_qini_curves.png", dpi=140, bbox_inches="tight")
-print(f"Saved -> {FIG_DIR}/04c_qini_curves.png")
+plt.savefig(FIG_DIR / "08_qini_curves.png", dpi=140, bbox_inches="tight")
+print(f"Saved -> {FIG_DIR}/08_qini_curves.png")
 plt.show()
 
 
@@ -234,13 +249,52 @@ print("\nDecile view (10 = top-predicted persuadables, 0 = bottom):")
 print(f"{'decile':>6} {'n_users':>8} {'pred_lift':>10} "
       f"{'ctrl_churn':>10} {'trmt_churn':>10} {'actual_lift':>11}")
 print("-" * 62)
+decile_rows = []
 for d in sorted(buckets["decile"].unique(), reverse=True):
     b = buckets[buckets["decile"] == d]
     ctrl = b[b["treated"] == 0]["y_observed"].mean()
     trmt = b[b["treated"] == 1]["y_observed"].mean()
     actual = ctrl - trmt
-    print(f"{int(d):>6} {len(b):>8,} {b['predicted_retention_lift'].mean():>+10.4f} "
+    predicted = b["predicted_retention_lift"].mean()
+    decile_rows.append({"decile": int(d), "n": len(b), "predicted": predicted,
+                        "ctrl_churn": ctrl, "trmt_churn": trmt, "actual": actual})
+    print(f"{int(d):>6} {len(b):>8,} {predicted:>+10.4f} "
           f"{ctrl:>10.4f} {trmt:>10.4f} {actual:>+11.4f}")
+decile_df = pd.DataFrame(decile_rows).sort_values("decile")
+
+# Decile lift chart -- visualizes the printed table above
+fig, ax = plt.subplots(figsize=(10, 5.5))
+x_pos = np.arange(len(decile_df))
+bar_width = 0.38
+bars_actual = ax.bar(x_pos - bar_width / 2, decile_df["actual"],
+                     bar_width, color="#5AD8A6",
+                     edgecolor="white", label="Actual retention lift (observed)")
+bars_pred = ax.bar(x_pos + bar_width / 2, decile_df["predicted"],
+                   bar_width, color="#5B8FF9",
+                   edgecolor="white", label="Predicted retention lift (model)")
+
+ax.axhline(0, color="black", linewidth=0.8)
+ax.set_xticks(x_pos)
+ax.set_xticklabels([f"D{d}" for d in decile_df["decile"]])
+ax.set_xlabel("Decile of predicted retention lift  (D9 = top persuadables, D0 = bottom)")
+ax.set_ylabel("Retention lift  (positive = churn reduced)")
+ax.set_title(f"Decile lift chart — {winner_name} on {FOCUS_LEVER}\n"
+             "monotonic staircase = model ranks the right users",
+             fontweight="bold")
+ax.legend(loc="upper left")
+ax.grid(axis="y", linestyle="--", alpha=0.4)
+
+# Value labels on the actual-lift bars (the ones the business cares about)
+for bar, v in zip(bars_actual, decile_df["actual"]):
+    y_pos = v + (0.003 if v >= 0 else -0.008)
+    ax.text(bar.get_x() + bar.get_width() / 2, y_pos,
+            f"{v:+.3f}", ha="center", fontsize=8,
+            color="#2c8560", fontweight="bold")
+
+plt.tight_layout()
+plt.savefig(FIG_DIR / "08_decile_lift.png", dpi=140, bbox_inches="tight")
+print(f"\nSaved -> {FIG_DIR}/08_decile_lift.png")
+plt.show()
 
 # Sleeping-dog check: bottom decile should show actual_lift close to 0
 # or NEGATIVE (treatment hurts these users). If our model works, the top
@@ -261,17 +315,31 @@ print("\n" + "=" * 70)
 print("E. PERSIST WINNER")
 print("=" * 70)
 
+# Persist to the path declared in src/models/production.py so every
+# downstream consumer (uplift-aware policy, future uplift-aware Streamlit
+# tab) loads exactly this artifact.
 winner_model = fitted[winner_name]
-out_path = MODEL_DIR / f"uplift_{FOCUS_LEVER}_v1.pkl"
-with open(out_path, "wb") as f:
+UPLIFT_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+with open(UPLIFT_MODEL_PATH, "wb") as f:
     pickle.dump({
-        "model": winner_model,
-        "model_type": winner_name,
-        "focus_lever": FOCUS_LEVER,
-        "feature_names": list(X.columns),
-        "metrics_test": results[winner_name],
+        UPLIFT_MODEL_ARTIFACT_KEY: winner_model,   # <- key that loader reads
+        "model_type":              winner_name,
+        "focus_lever":             FOCUS_LEVER,
+        "feature_names":           list(X.columns),
+        "metrics_test":            results[winner_name],
     }, f)
-print(f"Saved winner ({winner_name}) -> {out_path}")
+print(f"Saved winner ({winner_name}) -> {UPLIFT_MODEL_PATH}")
+
+# Promote the winner to the MLflow Model Registry using the run_id we
+# captured during the bake-off loop. Downstream jobs can load
+# `models:/{UPLIFT_MODEL_REGISTRY_NAME}@production` without a run ID.
+# The pickle stays as the portable deploy-time artifact.
+winner_run_id = run_ids.get(winner_name)
+register_production_model(
+    winner_run_id,
+    UPLIFT_MODEL_REGISTRY_NAME,
+    artifact_name="uplift_model",
+)
 
 
 # %% [markdown]

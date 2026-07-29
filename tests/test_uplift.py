@@ -1,4 +1,4 @@
-"""Unit tests for Phase 4c uplift modeling: trainers, evaluation
+"""Unit tests for Phase 8 uplift modeling: trainers, evaluation
 metrics, and the uplift-aware decision policy."""
 import numpy as np
 import pandas as pd

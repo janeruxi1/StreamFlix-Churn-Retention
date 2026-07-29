@@ -1,28 +1,50 @@
-"""
-Phase 2 -- EDA + Survival Analysis
-====================================
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.16.0
+# ---
 
-With the data validated in Phase 1, we now look for the *patterns* that
-the model will need to capture and the *segments* that matter for the
-cost-aware decision rule downstream.
+# %% [markdown]
+# # Phase 2 — EDA + Survival Analysis
+#
+# With the data validated in Phase 1, we now look for the **patterns** the model will
+# need to capture and the **segments** that matter for the cost-aware decision rule
+# downstream.
+#
+# ## Sections
+#
+# | Section | Purpose |
+# |---|---|
+# | **A. Population overview** | Who is in the dataset |
+# | **B. Churn rates by segment** | Which categorical slices differ from baseline |
+# | **C. Kaplan-Meier survival** | Structural covariates (5 strata) |
+# | **C2. Landmark analysis** | Handles time-varying covariate (engagement_cohort) |
+# | **C3. Sensitivity check** | Landmark-choice robustness |
+# | **D. Hazard by tenure** | m2 / m12 spike visualization |
+# | **E. Engagement trend** | Churners vs non-churners distribution |
+# | **F. Tenure × cohort heatmap** | 2D segment view |
+# | **G. Verdict** | Handoff to Phase 3 (feature engineering) |
+#
+# All figures saved under `reports/figures/`.
 
-Sections:
-    A. Population overview          -- who is in the dataset
-    B. Churn rates by categorical segment
-    C. Kaplan-Meier survival curves -- structural covariates (5 strata)
-    C2. Landmark analysis           -- engagement_cohort (time-varying)
-    C3. Sensitivity check           -- landmark robustness
-    D. Hazard by tenure month       -- m2 / m12 spike visualization
-    E. Engagement-trend distribution -- churners vs. non-churners
-    F. Tenure x cohort heatmap      -- 2D segment view
-    G. Phase 2 verdict / handoff to Phase 3
-
-All figures saved under reports/figures/.
-"""
+# %%
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Run from project root whether invoked as `python notebooks/02_...` or
+# from a Jupyter cell (which doesn't define __file__).
+try:
+    _project_root = Path(__file__).resolve().parents[1]
+except NameError:
+    _here = Path.cwd()
+    _project_root = _here.parent if _here.name == "notebooks" else _here
+os.chdir(_project_root)
+sys.path.insert(0, str(_project_root))
 
 import numpy as np
 import pandas as pd
@@ -36,9 +58,13 @@ FIG_DIR.mkdir(parents=True, exist_ok=True)
 df = load_subscribers("data/subscribers.csv")
 
 
-# =====================================================================
-# A. Population overview
-# =====================================================================
+# %% [markdown]
+# ## A. Population overview
+#
+# Shares of every categorical/boolean segment — sanity check that the dataset composition
+# matches what the PM brief describes.
+
+# %%
 print("=" * 70)
 print("A. POPULATION OVERVIEW")
 print("=" * 70)
@@ -54,9 +80,13 @@ for col in ["plan_tier", "billing_cycle", "country", "payment_method",
             print(f"      {k:<15} {v:.1%}")
 
 
-# =====================================================================
-# B. Churn rate by categorical segment
-# =====================================================================
+# %% [markdown]
+# ## B. Churn rate by categorical segment
+#
+# Which segments churn at ≥ 1.5× the baseline rate. These are the natural candidates for
+# targeted intervention in the Phase 6 policy.
+
+# %%
 print("\n" + "=" * 70)
 print("B. CHURN RATE BY CATEGORICAL SEGMENT")
 print("=" * 70)
@@ -102,17 +132,18 @@ for col in seg_cols:
             print(f"  {col:<20} = {seg_val:<15}  rate = {rate:.2%}")
 
 
-# =====================================================================
-# C. Kaplan-Meier survival curves -- structural covariates
-# =====================================================================
+# %% [markdown]
+# ## C. Kaplan-Meier survival curves — structural covariates
+#
+# Stratify on covariates set **at or near signup** that stay stable (plan_tier,
+# billing_cycle, payment_method, auto_renew). KM's *"covariate fixed at t=0"* assumption
+# holds for these. Time-varying covariates (engagement_cohort) are handled separately in
+# C2 with landmark analysis.
+
+# %%
 print("\n" + "=" * 70)
 print("C. KAPLAN-MEIER SURVIVAL CURVES (structural covariates)")
 print("=" * 70)
-# Stratify on covariates that are SET AT OR NEAR SIGNUP and stable over
-# time (plan_tier, billing_cycle, payment_method, auto_renew). KM's
-# 'covariate fixed at t=0' assumption holds for these. Time-varying
-# covariates (engagement_cohort) are handled separately in C2 with
-# landmark analysis.
 
 
 def km(durations: np.ndarray, events: np.ndarray) -> pd.DataFrame:
@@ -224,26 +255,27 @@ for col in ["auto_renew", "payment_method"]:
     print(df.groupby(col)["churned_next_30d"].agg(["mean", "count"]).round(4))
 
 
-# =====================================================================
-# C2. Landmark analysis: engagement_cohort (time-varying covariate)
-# =====================================================================
+# %% [markdown]
+# ## C2. Landmark analysis — engagement_cohort (time-varying covariate)
+#
+# `engagement_cohort` is **time-varying**: a user labeled `casual` at month 3 might be
+# `heavy` at month 12. Naive KM stratification by current cohort suffers from
+# **immortal-time bias** — the `heavy` cohort is enriched with users who survived long
+# enough to *become* heavy.
+#
+# Landmark analysis fixes this:
+# 1. Condition on survival to a landmark time `t*`
+# 2. Stratify by covariate value at `t*`
+# 3. Compute survival **forward** from `t*`
+#
+# In our cross-sectional snapshot we observe cohort once, so the landmark approximation
+# is *"restrict to users who survived to t*=6"* — users whose cohort label is more stable
+# and less affected by survival selection.
+
+# %%
 print("\n" + "=" * 70)
 print("C2. LANDMARK ANALYSIS -- engagement_cohort")
 print("=" * 70)
-# engagement_cohort is a TIME-VARYING covariate: a user labeled 'casual'
-# at month 3 might be 'heavy' at month 12. Naive KM stratification by
-# current cohort suffers from immortal-time bias -- the heavy cohort is
-# enriched with users who survived long enough to BECOME heavy.
-#
-# Landmark analysis fixes this by:
-#   1. Conditioning on survival to a landmark time t*
-#   2. Stratifying by covariate value at t*
-#   3. Computing survival forward from t*
-#
-# In our cross-sectional snapshot we observe cohort once -- so the
-# landmark approximation is "restrict to users who survived to t*=6"
-# (i.e. users whose cohort label is more stable / less affected by
-# survival selection).
 
 LANDMARK = 6
 established = df[df["tenure_months"] >= LANDMARK].copy()
@@ -305,14 +337,17 @@ comp["delta_pp"] = (comp["landmark"] - comp["naive"]).round(2)
 print(comp)
 
 
-# =====================================================================
-# C3. Sensitivity check: does the cohort gap survive across t* choices?
-# =====================================================================
+# %% [markdown]
+# ## C3. Sensitivity check — does the cohort gap survive across `t*` choices?
+#
+# A single landmark choice is a judgment call. Sweep across plausible values (2, 4, 6, 9,
+# 12) and check whether the cohort gap survives at every choice. If it does, the finding
+# is robust; if it flips, the analysis is fragile.
+
+# %%
 print("\n" + "=" * 70)
 print("C3. SENSITIVITY CHECK -- landmark robustness")
 print("=" * 70)
-# A single landmark choice is a judgment call. Sweep across plausible
-# values and check whether the cohort gap survives at every choice.
 
 landmark_values = [2, 4, 6, 9, 12]
 rows = []
@@ -369,9 +404,14 @@ plt.savefig(FIG_DIR / "02_landmark_sensitivity.png",
 print(f"\nSaved -> {FIG_DIR}/02_landmark_sensitivity.png")
 
 
-# =====================================================================
-# D. Hazard rate by tenure month
-# =====================================================================
+# %% [markdown]
+# ## D. Hazard rate by tenure month
+#
+# Verify the two spikes the PM brief calls out: **m2 (post-trial drop)** and
+# **m12 (annual reassessment)**. These are the timing windows for the retention team's
+# blanket-m11 campaign that Phase 6 will beat.
+
+# %%
 print("\n" + "=" * 70)
 print("D. HAZARD RATE BY TENURE MONTH (m2/m12 spike check)")
 print("=" * 70)
@@ -404,9 +444,14 @@ plt.savefig(FIG_DIR / "02_tenure_hazard.png", dpi=140, bbox_inches="tight")
 print(f"Saved -> {FIG_DIR}/02_tenure_hazard.png")
 
 
-# =====================================================================
-# E. Engagement-trend distribution: churners vs non-churners
-# =====================================================================
+# %% [markdown]
+# ## E. Engagement-trend distribution — churners vs non-churners
+#
+# `watch_trend_7d_to_30d = watch_hours_7d × (30/7) / watch_hours_30d`. Values `< 1` mean
+# a user is watching *less* in the recent week than their monthly baseline (declining
+# engagement); `> 1` means they're heating up. Churners should skew heavily below 1.
+
+# %%
 print("\n" + "=" * 70)
 print("E. ENGAGEMENT TREND -- churners vs non-churners")
 print("=" * 70)
@@ -439,9 +484,14 @@ plt.savefig(FIG_DIR / "02_engagement_trend.png", dpi=140, bbox_inches="tight")
 print(f"Saved -> {FIG_DIR}/02_engagement_trend.png")
 
 
-# =====================================================================
-# F. Tenure x engagement-cohort heatmap
-# =====================================================================
+# %% [markdown]
+# ## F. Tenure × engagement-cohort heatmap
+#
+# 2D view: how does churn rate vary across the interaction of tenure bucket and
+# engagement cohort? The extremes of this heatmap are where targeted intervention would
+# have the biggest per-user ROI.
+
+# %%
 print("\n" + "=" * 70)
 print("F. CHURN HEATMAP: tenure bucket x engagement cohort")
 print("=" * 70)
@@ -483,9 +533,14 @@ print(f"Saved -> {FIG_DIR}/02_tenure_cohort_heatmap.png")
 print(f"\nHeatmap values:\n{(heatmap * 100).round(2)}")
 
 
-# =====================================================================
-# G. Verdict / Phase 3 setup
-# =====================================================================
+# %% [markdown]
+# ## G. Verdict — handoff to Phase 3
+#
+# Distills the key patterns Phase 3 needs to encode as features: plan-tier spread,
+# engagement-trend divergence between churners and non-churners, and the tenure × cohort
+# gap.
+
+# %%
 print("\n" + "=" * 70)
 print("G. PHASE 2 VERDICT")
 print("=" * 70)

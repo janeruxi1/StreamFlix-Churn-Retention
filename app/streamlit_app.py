@@ -26,6 +26,10 @@ import matplotlib.pyplot as plt
 from src.data.loader import load_subscribers
 from src.features.transforms import build_features
 from src.models.train import prepare_features
+from src.models.production import (
+    CHURN_MODEL_PATH, CHURN_MODEL_ARTIFACT_KEY,
+    load_production_churn_model,
+)
 from src.decisions.policy import (
     INTERVENTION_MENU, LTV_BY_TIER, PREMIUM_UPGRADE_CAP_PCT,
     score_all_levers, pick_best_lever, apply_budget_cap,
@@ -43,9 +47,10 @@ st.set_page_config(
 # --- Bootstrap: generate data + model if missing (for Streamlit Cloud) ----
 def _bootstrap_if_needed() -> None:
     """First-boot setup for Streamlit Cloud, where the repo is cloned
-    fresh and data/ and models/ are gitignored."""
+    fresh and data/ and models/ are gitignored. Uses the same path
+    constant as everywhere else via src/models/production.py, so the
+    bootstrap and the main load stay in sync automatically."""
     data_path = Path("data/subscribers.csv")
-    model_path = Path("models/churn_model_v1.pkl")
 
     if not data_path.exists():
         with st.spinner("First-boot setup: generating synthetic dataset..."):
@@ -53,7 +58,7 @@ def _bootstrap_if_needed() -> None:
             data_path.parent.mkdir(parents=True, exist_ok=True)
             simulate_subscribers(SimConfig()).to_csv(data_path, index=False)
 
-    if not model_path.exists():
+    if not CHURN_MODEL_PATH.exists():
         with st.spinner("First-boot setup: training model (this runs once)..."):
             from sklearn.model_selection import train_test_split
             from src.models.train import (
@@ -72,10 +77,10 @@ def _bootstrap_if_needed() -> None:
             lr = train_logistic_regression(X_train, y_train)
             xgb = train_xgboost(X_train, y_train)
             xgb_cal = calibrate_xgboost(xgb, X_calib, y_calib, method="sigmoid")
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(model_path, "wb") as f:
+            CHURN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(CHURN_MODEL_PATH, "wb") as f:
                 pickle.dump({
-                    "production_model": xgb_cal,
+                    CHURN_MODEL_ARTIFACT_KEY: xgb_cal,
                     "baseline_model": lr,
                     "feature_names": list(X.columns),
                     "metrics": {
@@ -98,9 +103,9 @@ def load_pipeline():
     raw = load_subscribers("data/subscribers.csv")
     df = build_features(raw)
     X, y = prepare_features(df)
-    with open("models/churn_model_v1.pkl", "rb") as f:
-        artifact = pickle.load(f)
-    model = artifact["production_model"]
+    # Load via src/models/production.py so we're guaranteed to be reading
+    # the same artifact Phase 4 wrote and Phase 6/7 also read from.
+    model, artifact = load_production_churn_model()
     X = X[artifact["feature_names"]]
     p_churn = model.predict_proba(X)[:, 1]
     ltv = df["plan_tier"].map(LTV_BY_TIER).values

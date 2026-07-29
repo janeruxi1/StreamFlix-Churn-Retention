@@ -184,7 +184,7 @@ def summarize_policy(policy: pd.DataFrame,
 
 
 # ---------------------------------------------------------------------
-# Uplift-based lever selection (Phase 4c)
+# Uplift-based lever selection (Phase 8)
 # ---------------------------------------------------------------------
 def pick_best_lever_uplift(uplift_by_lever: Dict[str, np.ndarray],
                            ltv: np.ndarray,

@@ -1,22 +1,46 @@
-"""
-Phase 3 -- Feature Engineering
-================================
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.16.0
+# ---
 
-Build the reusable feature transforms identified in Phase 2's reflection.
-This walkthrough:
+# %% [markdown]
+# # Phase 3 — Feature Engineering
+#
+# Build the reusable feature transforms identified in Phase 2's reflection. All logic
+# lives in `src/features/transforms.py:build_features()` so it's importable from every
+# downstream notebook + the Streamlit app + the tests.
+#
+# ## Sections
+#
+# | Section | Purpose |
+# |---|---|
+# | **A. Build features** | Load raw + apply `build_features()` |
+# | **B. Distributions** | Inspect engineered feature ranges and shapes |
+# | **C. Signal comparison** | Univariate correlations: engineered vs raw |
+# | **D. Multicollinearity** | Redundancy check across engineered features |
+# | **E. Verdict** | Which features go into Phase 4 modeling |
+#
+# All figures saved under `reports/figures/`.
 
-    A. Loads raw data, applies build_features() from src/features/
-    B. Inspects the engineered features (distributions, value ranges)
-    C. Compares engineered signal vs raw signal (univariate correlations)
-    D. Checks multicollinearity between engineered features
-    E. Verdict -- which features to keep into Phase 4 modeling
-
-All figures saved under reports/figures/.
-"""
+# %%
+import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Run from project root whether invoked as `python notebooks/03_...` or
+# from a Jupyter cell (which doesn't define __file__).
+try:
+    _project_root = Path(__file__).resolve().parents[1]
+except NameError:
+    _here = Path.cwd()
+    _project_root = _here.parent if _here.name == "notebooks" else _here
+os.chdir(_project_root)
+sys.path.insert(0, str(_project_root))
 
 import numpy as np
 import pandas as pd
@@ -28,6 +52,10 @@ from src.features.transforms import build_features, ENGINEERED_COLUMNS
 FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
+# %% [markdown]
+# ## A. Build features — apply `build_features()` and inspect what got added
+
+# %%
 raw = load_subscribers("data/subscribers.csv")
 df = build_features(raw)
 
@@ -40,9 +68,10 @@ for c in new_cols:
     print(f"  {c:<35}  dtype={df[c].dtype}")
 
 
-# =====================================================================
-# B. Engineered feature distributions
-# =====================================================================
+# %% [markdown]
+# ## B. Engineered feature distributions
+
+# %%
 print("\n" + "=" * 70)
 print("B. ENGINEERED FEATURE DISTRIBUTIONS")
 print("=" * 70)
@@ -78,9 +107,15 @@ plt.savefig(FIG_DIR / "03_engineered_distributions.png",
 print(f"\nSaved -> {FIG_DIR}/03_engineered_distributions.png")
 
 
-# =====================================================================
-# C. Engineered signal vs raw signal (univariate correlations)
-# =====================================================================
+# %% [markdown]
+# ## C. Signal comparison — engineered vs raw (univariate)
+#
+# Note: engineered features often *don't* beat raw correlations one-on-one. That's
+# expected — tree models earn their value through **interactions**, not univariate
+# signal. The engineered features carry structural info (recency ratios, trend
+# directions) that the tree can combine downstream.
+
+# %%
 print("\n" + "=" * 70)
 print("C. SIGNAL COMPARISON: raw features vs engineered")
 print("=" * 70)
@@ -137,9 +172,15 @@ for col in ["payment_health_score", "active_risk_event_count"]:
     print(f"  {col:<35} corr={corr:+.3f}")
 
 
-# =====================================================================
-# D. Multicollinearity check
-# =====================================================================
+# %% [markdown]
+# ## D. Multicollinearity check
+#
+# Correlation matrix across the engineered features + a few key raw ones. Flag any pair
+# with `|corr| > 0.85` as a candidate for redundancy. Deliberately **not pruning**
+# before modeling — that would drop features that only matter in combinations. Let SHAP
+# in Phase 5 rank them properly.
+
+# %%
 print("\n" + "=" * 70)
 print("D. MULTICOLLINEARITY: engineered feature correlations")
 print("=" * 70)
@@ -189,9 +230,10 @@ else:
     print("\nNo problematic multicollinearity (all pairs |corr| <= 0.85)")
 
 
-# =====================================================================
-# E. Verdict
-# =====================================================================
+# %% [markdown]
+# ## E. Verdict — features going into Phase 4
+
+# %%
 print("\n" + "=" * 70)
 print("E. PHASE 3 VERDICT")
 print("=" * 70)

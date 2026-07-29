@@ -245,7 +245,7 @@ def simulate_subscribers(cfg: SimConfig = SimConfig()) -> pd.DataFrame:
     churned_next_30d = rng.binomial(1, churn_prob).astype(int)
 
     # ---- 8.5. Treatment assignment & counterfactual outcomes (uplift) ----
-    # Simulates a randomized retention experiment for Phase 4c uplift
+    # Simulates a randomized retention experiment for Phase 8 uplift
     # modeling. 50% of users receive a lever from the intervention menu;
     # the other 50% are control. For each treated user we draw a
     # counterfactual outcome under the assigned lever with per-user
@@ -344,7 +344,7 @@ def simulate_subscribers(cfg: SimConfig = SimConfig()) -> pd.DataFrame:
         "days_until_promo_expires": days_until_promo_expires,
         "monthly_revenue": monthly_revenue,
         "churned_next_30d": churned_next_30d,
-        # Phase 4c: uplift-model experimental columns
+        # Phase 8: uplift-model experimental columns
         "treated": treated,
         "treatment_lever": treatment_lever,
         "churned_if_treated": churned_if_treated,
@@ -355,12 +355,41 @@ def simulate_subscribers(cfg: SimConfig = SimConfig()) -> pd.DataFrame:
     return df
 
 
-def main(out_path: str | Path = "data/subscribers.csv") -> None:
+# Columns added in v4 for the Phase 8 uplift experiment.
+# The pre-experiment baseline file (data/subscribers.csv) DROPS these so
+# Phase 4-6 read the same data a real Retention team would have had before
+# they ran the A/B holdout. The experiment file keeps them.
+_EXPERIMENT_COLS = [
+    "treated", "treatment_lever", "churned_if_treated",
+    "y_observed", "true_uplift",
+]
+
+
+def main(
+    baseline_path: str | Path = "data/subscribers.csv",
+    experiment_path: str | Path = "data/subscribers_experiment.csv",
+) -> None:
     df = simulate_subscribers()
-    out = Path(out_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out, index=False)
-    print(f"Wrote {len(df):,} subscribers to {out}\n")
+
+    # v3 baseline snapshot -- pre-experiment production data.
+    # This is the file Phase 4 (churn model), Phase 4b (model bake-off),
+    # Phase 5 (SHAP), and Phase 6 (blanket-vs-targeted policy) all use.
+    # It represents the world before any randomized retention experiment
+    # was run -- everyone's outcome is their untreated potential outcome.
+    baseline_out = Path(baseline_path)
+    baseline_out.parent.mkdir(parents=True, exist_ok=True)
+    df_baseline = df.drop(columns=[c for c in _EXPERIMENT_COLS if c in df.columns])
+    df_baseline.to_csv(baseline_out, index=False)
+    print(f"Wrote v3 BASELINE  ({len(df):,} rows x {df_baseline.shape[1]} cols) "
+          f"-> {baseline_out}")
+
+    # v4 experiment snapshot -- adds the randomized treatment layer.
+    # This is what a Retention team would have AFTER running an A/B
+    # holdout. Phase 8 (uplift modeling) consumes this file.
+    experiment_out = Path(experiment_path)
+    df.to_csv(experiment_out, index=False)
+    print(f"Wrote v4 EXPERIMENT ({len(df):,} rows x {df.shape[1]} cols) "
+          f"-> {experiment_out}\n")
 
     rate = df["churned_next_30d"].mean()
     print(f"Overall 30-day churn rate: {rate:.2%}  "
@@ -385,8 +414,8 @@ def main(out_path: str | Path = "data/subscribers.csv") -> None:
           f"{((df['days_since_plan_change'] >= 0) & (df['days_since_plan_change'] <= 90)).mean():.1%}")
     print(f"Users with active promo: {df['promo_active'].mean():.1%}")
 
-    # Treatment experiment stats (Phase 4c)
-    print(f"\nTreatment/control (Phase 4c uplift experiment):")
+    # Treatment experiment stats (Phase 8)
+    print(f"\nTreatment/control (Phase 8 uplift experiment):")
     print(f"  Treated:   {df['treated'].mean():.1%}")
     print(f"  Control:   {(1 - df['treated']).mean():.1%}")
     print(f"  Lever mix (treated only):")
@@ -410,11 +439,6 @@ def main(out_path: str | Path = "data/subscribers.csv") -> None:
         corr = df[col].corr(df["churned_next_30d"])
         flag = "  **" if abs(corr) > 0.15 else ""
         print(f"  {col:<30}  {corr:+.3f}{flag}")
-
-    out_path = Path("data/subscribers.csv")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_path, index=False)
-    print(f"\nWrote {len(df):,} rows -> {out_path}")
 
 
 if __name__ == "__main__":
