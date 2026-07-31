@@ -46,6 +46,8 @@ Metric framework: [`reports/metrics_framework.md`](./reports/metrics_framework.m
 | Stakeholder decision memo + hero figure *(v1 recommendation)* | `reports/decision_memo.md`, `notebooks/07_hero_figure.py` |
 | Interactive Streamlit decision-support app | `app/streamlit_app.py` |
 | Causal / uplift modeling — T/S/X-learners + Qini + decile lift *(v2)* | `notebooks/08_uplift_modeling.py`, `src/models/uplift.py` |
+| v1 vs v2 head-to-head against simulator ground truth | `notebooks/09_policy_comparison.py` |
+| Fairness / segment-parity audit (calibration + recall) | `notebooks/10_fairness_audit.py` |
 | Production code quality (tests, CI) | `src/`, `tests/`, `.github/workflows/` |
 
 ---
@@ -87,7 +89,9 @@ The two files share the same 50,000 rows; the experiment file adds five columns 
 │   ├── 05_shap_levers.py / .ipynb       # SHAP → actionable retention levers
 │   ├── 06_decision_rule.py / .ipynb     # Cost-aware policy + ROI sweep (v1 policy)
 │   ├── 07_hero_figure.py / .ipynb       # Builds reports/figures/07_hero_summary.png
-│   └── 08_uplift_modeling.py / .ipynb   # v2: causal uplift (T/S/X-learner) + Qini
+│   ├── 08_uplift_modeling.py / .ipynb   # v2: causal uplift (T/S/X-learner) + Qini
+│   ├── 09_policy_comparison.py / .ipynb # v1 vs v2 head-to-head vs ground truth
+│   └── 10_fairness_audit.py / .ipynb    # Segment performance + calibration parity
 ├── src/                             # Reusable, tested modules
 │   ├── data/
 │   │   ├── simulate.py              # Synthetic data generator
@@ -201,7 +205,7 @@ Run locally: `pytest tests/`
 
 ## 📚 Roadmap
 
-The project is built in 11 phases that mirror an end-to-end retention modeling workflow:
+The project is built in 13 phases that mirror an end-to-end retention modeling workflow:
 
 1. ✅ **Phase 0:** Project setup, PM brief, metric framework
 2. ✅ **Phase 1:** Synthetic dataset generator + data audit
@@ -213,7 +217,9 @@ The project is built in 11 phases that mirror an end-to-end retention modeling w
 8. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep *(v1 policy — propensity-based)*
 9. ✅ **Phase 7:** Decision memo + Streamlit decision-support app *(v1 recommendation)*
 10. ✅ **Phase 8:** Uplift (causal) modeling — T/S/X-learners + Qini AUC *(v2: per-user retention lift replaces the fixed-uplift constant)*
-11. ✅ **Phase 9:** Production polish (79 unit tests, GitHub Actions CI, MIT license)
+11. ✅ **Phase 9:** Head-to-head — v1 (propensity) vs v2 (uplift) scored against the simulator's ground-truth `true_uplift`
+12. ✅ **Phase 10:** Fairness / segment-parity audit — PR-AUC + Brier + calibration + recall parity across plan tier, tenure bucket, engagement cohort, country
+13. ✅ **Phase 11:** Production polish (79 unit tests, GitHub Actions CI, MIT license)
 
 ---
 

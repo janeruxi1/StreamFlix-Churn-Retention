@@ -70,6 +70,40 @@ UPLIFT_MODEL_MLFLOW_URI = f"models:/{UPLIFT_MODEL_REGISTRY_NAME}@production"
 # Loaders -- consumers should call these instead of loading pickles
 # directly, so path/key changes propagate through automatically.
 # =====================================================================
+def _load_pickle_with_helpful_errors(path: Path, artifact_key: str,
+                                     regen_command: str) -> Tuple[Any, Dict[str, Any]]:
+    """Shared pickle loader that converts common failure modes into
+    action-oriented error messages.
+
+    Handles:
+        - Missing file  -> tells you which notebook to run
+        - sklearn version mismatch (e.g. pickle from sklearn 1.7 loaded
+          on 1.4)  -> tells you to regenerate locally
+    """
+    import pickle
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found. Regenerate with:\n    {regen_command}"
+        )
+    try:
+        with open(path, "rb") as f:
+            artifact = pickle.load(f)
+    except ModuleNotFoundError as e:
+        # Common case: pickle was created with sklearn >= 1.6 (which has
+        # sklearn.frozen.FrozenEstimator) and is being loaded on sklearn
+        # < 1.6. Regenerating on the current environment picks the
+        # right calibration path via the try/except in calibrate_xgboost.
+        raise ModuleNotFoundError(
+            f"Failed to unpickle {path.name}: {e}\n\n"
+            f"This usually means the pickle was created with a newer\n"
+            f"scikit-learn (>= 1.6) than the one you're loading with.\n"
+            f"Regenerate on THIS machine so the pickle matches your\n"
+            f"local sklearn version:\n"
+            f"    {regen_command}"
+        ) from e
+    return artifact[artifact_key], artifact
+
+
 def load_production_churn_model() -> Tuple[Any, Dict[str, Any]]:
     """Load the currently-shipped churn model (Phase 4 output).
 
@@ -79,18 +113,15 @@ def load_production_churn_model() -> Tuple[Any, Dict[str, Any]]:
         need the metadata.
 
     Raises:
-        FileNotFoundError if the pickle doesn't exist. The error message
-        points at the training notebook to regenerate it.
+        FileNotFoundError if the pickle doesn't exist.
+        ModuleNotFoundError with regeneration instructions if the pickle
+        was created with a newer sklearn than the current environment.
     """
-    import pickle
-    if not CHURN_MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"{CHURN_MODEL_PATH} not found. Regenerate with:\n"
-            f"    python notebooks/04_modeling.py"
-        )
-    with open(CHURN_MODEL_PATH, "rb") as f:
-        artifact = pickle.load(f)
-    return artifact[CHURN_MODEL_ARTIFACT_KEY], artifact
+    return _load_pickle_with_helpful_errors(
+        CHURN_MODEL_PATH,
+        CHURN_MODEL_ARTIFACT_KEY,
+        regen_command="python notebooks/04_modeling.py",
+    )
 
 
 def load_production_uplift_model() -> Tuple[Any, Dict[str, Any]]:
@@ -102,13 +133,11 @@ def load_production_uplift_model() -> Tuple[Any, Dict[str, Any]]:
 
     Raises:
         FileNotFoundError if the pickle doesn't exist.
+        ModuleNotFoundError with regeneration instructions if the pickle
+        was created with a newer sklearn than the current environment.
     """
-    import pickle
-    if not UPLIFT_MODEL_PATH.exists():
-        raise FileNotFoundError(
-            f"{UPLIFT_MODEL_PATH} not found. Regenerate with:\n"
-            f"    python notebooks/08_uplift_modeling.py"
-        )
-    with open(UPLIFT_MODEL_PATH, "rb") as f:
-        artifact = pickle.load(f)
-    return artifact[UPLIFT_MODEL_ARTIFACT_KEY], artifact
+    return _load_pickle_with_helpful_errors(
+        UPLIFT_MODEL_PATH,
+        UPLIFT_MODEL_ARTIFACT_KEY,
+        regen_command="python notebooks/08_uplift_modeling.py",
+    )
