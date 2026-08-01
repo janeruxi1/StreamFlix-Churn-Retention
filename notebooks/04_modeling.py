@@ -34,7 +34,8 @@
 # | **E. Discrimination curves** | PR + ROC overlay for all three models |
 # | **F. Calibration curves** | Reliability diagrams before vs after |
 # | **G. Top-K targeting** | Precision/recall at K% — direct input to Phase 6 |
-# | **H. Verdict + persistence** | Pick production model, save to `models/churn_model_v1.pkl` |
+# | **H. Cumulative gain + lift chart** | Business-vocabulary view: lift @ top K vs random |
+# | **I. Verdict + persistence** | Pick production model, save to `models/churn_model_v1.pkl` |
 #
 # All figures saved under `reports/figures/`.
 
@@ -371,7 +372,126 @@ print(f"\nSaved -> {FIG_DIR}/04_top_k_targeting.png")
 
 
 # %% [markdown]
-# ## H. Verdict + model persistence
+# ## H. Cumulative gain + lift chart
+#
+# The classical marketing-analytics view of Section G's top-K story, translated from
+# DS vocabulary (precision/recall) into business vocabulary (gain/lift). What a PM
+# will point at during a review.
+#
+# - **Cumulative gain curve** — "if we target the top K% by score, what fraction of
+#   true churners do we catch?" A perfect model captures all churners after targeting
+#   only `n_positives / n_total` of the population (~5.4% in our case).
+# - **Lift chart** — "how many times better than random is targeting the top K%?"
+#   Lift @10% = 3.5 means the top decile has 3.5× the churn concentration of the
+#   overall population.
+
+# %%
+print("\n" + "=" * 70)
+print("H. CUMULATIVE GAIN + LIFT CHART")
+print("=" * 70)
+
+# Sort users by predicted probability descending
+proba = xgb_cal_proba_test
+order = np.argsort(-proba)
+y_sorted = y_test.values[order]
+
+n_total = len(y_sorted)
+n_pos = int(y_sorted.sum())
+base_rate = n_pos / n_total
+
+# Cumulative curves
+cumulative_positives = np.cumsum(y_sorted)
+cumulative_gain = cumulative_positives / n_pos               # fraction caught
+cumulative_share = np.arange(1, n_total + 1) / n_total       # fraction targeted
+
+# Per-decile lift table
+decile_rows = []
+for d in range(1, 11):
+    k_frac = d / 10
+    k_count = int(np.ceil(n_total * k_frac))
+    n_caught = int(y_sorted[:k_count].sum())
+    gain = n_caught / n_pos if n_pos else 0
+    lift = gain / k_frac if k_frac > 0 else 0
+    decile_rows.append({
+        "decile":     f"top {int(k_frac*100)}%",
+        "k_count":    k_count,
+        "n_caught":   n_caught,
+        "gain":       round(gain, 3),
+        "lift":       round(lift, 2),
+    })
+lift_df = pd.DataFrame(decile_rows)
+print("\nLift by cumulative decile:")
+print(lift_df.to_string(index=False))
+
+# Business-language summary
+print(f"\nKey targeting summary (test set, n={n_total:,}, {n_pos:,} true churners):")
+for k_pct in [0.05, 0.10, 0.20]:
+    k_count = int(np.ceil(n_total * k_pct))
+    n_caught = int(y_sorted[:k_count].sum())
+    gain = n_caught / n_pos
+    lift = gain / k_pct
+    print(f"  Target top {int(k_pct*100):>3d}% ({k_count:>5,} users)  ->  "
+          f"catch {n_caught:>4,} churners ({gain:.1%} of all)  ->  lift = {lift:.2f}x")
+
+# Two-panel figure: gain curve + lift bars
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
+
+# LEFT: cumulative gain curve
+ax1.plot(cumulative_share * 100, cumulative_gain * 100,
+         color="#5B8FF9", linewidth=2.5, label="Calibrated XGBoost")
+ax1.plot([0, 100], [0, 100], color="gray", linestyle="--",
+         linewidth=1, label="random targeting")
+# Perfect model reaches 100% gain at share = base rate
+perfect_x = [0, base_rate * 100, 100]
+perfect_y = [0, 100, 100]
+ax1.plot(perfect_x, perfect_y, color="#5AD8A6", linestyle=":",
+         linewidth=1.5, label=f"perfect model (ceiling)")
+ax1.axvline(10, color="#F6AD55", linestyle=":", linewidth=1.5,
+            alpha=0.7, label="top 10% ref")
+ax1.set_xlabel("Share of users targeted (%)")
+ax1.set_ylabel("Share of true churners caught (%)")
+ax1.set_title("Cumulative gain curve\n"
+              "how many churners we catch as we widen the target set",
+              fontweight="bold", fontsize=11)
+ax1.set_xlim(0, 100)
+ax1.set_ylim(0, 105)
+ax1.grid(True, linestyle="--", alpha=0.4)
+ax1.legend(loc="lower right", fontsize=9)
+
+# RIGHT: lift bars per decile
+bar_colors = ["#5AD8A6" if l >= 2.0 else ("#5B8FF9" if l >= 1.0 else "#F6735B")
+              for l in lift_df["lift"]]
+bars = ax2.bar(lift_df["decile"], lift_df["lift"], color=bar_colors,
+               edgecolor="white")
+ax2.axhline(1.0, color="black", linestyle="--", linewidth=1.5,
+            label="random baseline (1.0×)")
+ax2.set_ylabel("Lift multiplier (vs random targeting)")
+ax2.set_title("Lift by cumulative decile\n"
+              "green = ≥ 2× random, blue = above random, red = below",
+              fontweight="bold", fontsize=11)
+for bar, v in zip(bars, lift_df["lift"]):
+    ax2.text(bar.get_x() + bar.get_width() / 2, v + 0.05,
+             f"{v:.2f}×", ha="center", fontsize=9, fontweight="bold")
+ax2.set_xticks(range(len(lift_df)))
+ax2.set_xticklabels(lift_df["decile"], rotation=30, ha="right")
+ax2.set_ylim(0, max(lift_df["lift"]) * 1.15)
+ax2.grid(axis="y", linestyle="--", alpha=0.4)
+ax2.legend(loc="upper right")
+
+for ax in (ax1, ax2):
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+plt.suptitle("Lift analysis -- calibrated XGBoost on the test set",
+             fontsize=12, fontweight="bold", y=1.02)
+plt.tight_layout()
+plt.savefig(FIG_DIR / "04_lift_chart.png", dpi=140, bbox_inches="tight")
+print(f"\nSaved -> {FIG_DIR}/04_lift_chart.png")
+plt.show()
+
+
+# %% [markdown]
+# ## I. Verdict + model persistence
 #
 # Both models (LR baseline + calibrated XGBoost) are pickled into
 # `models/churn_model_v1.pkl`. LR sits in the `baseline_model` slot as a documented
@@ -380,7 +500,7 @@ print(f"\nSaved -> {FIG_DIR}/04_top_k_targeting.png")
 
 # %%
 print("\n" + "=" * 70)
-print("H. VERDICT + MODEL PERSISTENCE")
+print("I. VERDICT + MODEL PERSISTENCE")
 print("=" * 70)
 # Honest read on the comparison:
 #   - LR and XGBoost are within 1-2 PR-AUC points of each other -- noise

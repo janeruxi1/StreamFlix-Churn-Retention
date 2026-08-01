@@ -62,6 +62,22 @@ We target the user only if the best available lever has positive EV.
 - `curated_playlist`: small tail of low-cost interventions
 - `premium_upgrade`: rare, gated by a 5% base cap to protect margins
 
+### How the targeting works — lift analysis
+
+The reason cost-aware targeting beats the blanket is simple: the calibrated model ranks users so that the top of the list has a much higher churn concentration than the base rate. Concretely:
+
+| Target | Users contacted (per 10k base) | True churners caught | Share of all churners | **Lift vs random** |
+|---|---|---|---|---|
+| Top **5%** | 500 | 118 | 22.1% | **4.4×** |
+| Top **10%** | 1,000 | 186 | 34.8% | **3.5×** |
+| Top **20%** | 2,000 | 276 | 51.7% | **2.6×** |
+
+Reading this: *the top 5% of the base — the 500 users the model flags as highest-risk — contains 22% of all real churners.* If we contacted only those 500 users we'd catch 4.4× more churners than sending 500 random credits.
+
+![Lift chart](figures/04_lift_chart.png)
+
+This is the mechanic that makes the ROI story work — most m11 users the blanket targets aren't going to churn, and the model can tell which few actually might.
+
 ---
 
 ## Risks & assumptions
@@ -73,7 +89,7 @@ We target the user only if the best available lever has positive EV.
 
 **The recommendation direction holds across all reasonable uplift assumptions.** But an A/B test per lever in production is the natural next step to nail down real numbers.
 
-**Model discrimination is modest.** PR-AUC = 0.17 (~3.3× lift over random), ROC-AUC = 0.74. The synthetic training data has no unmeasured interactions that a real production dataset would provide. In practice, we'd expect the model to improve as event-stream features (browsing, video-completion rates, notification opens) come online.
+**Model discrimination is modest.** PR-AUC = 0.17, ROC-AUC = 0.74, top-10% lift = 3.5× (see the lift chart above — steep decay from 3.5× at the top decile to 1.0× at the bottom, monotonic throughout, which is what a healthy ranking model looks like). The synthetic training data has no unmeasured interactions that a real production dataset would provide. In practice, we'd expect the model to improve as event-stream features (browsing, video-completion rates, notification opens) come online.
 
 **Budget doesn't currently bind.** Only ~3% of subscribers have any positive-EV lever, so the full targeted spend is $4.5k — far below the $200k cap. Adding budget doesn't buy more targeting on this data; we'd need either a stronger model or higher-uplift interventions.
 
