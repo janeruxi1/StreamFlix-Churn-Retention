@@ -116,10 +116,24 @@ ax1.set_ylabel("Net expected value ($ / month)", fontsize=11)
 ax1.set_title("Monthly net expected value",
               fontweight="bold", fontsize=13, pad=15)
 
+# Pad the y-axis so labels for both positive and negative bars have room
+# without colliding with the x-axis tick labels below the plot
+axis_range = max(net_evs) - min(net_evs)
+ax1.set_ylim(min(net_evs) - axis_range * 0.08,
+             max(net_evs) + axis_range * 0.15)
+
 for bar, val in zip(bars, net_evs):
-    y_pos = val + (max(net_evs) - min(net_evs)) * 0.04 * (1 if val >= 0 else -2.2)
+    if val >= 0:
+        # Positive bars: label above the top of the bar
+        y_pos = val + axis_range * 0.03
+        va = "bottom"
+    else:
+        # Negative bars: label INSIDE the bar (just above the base of the
+        # bar, above the x-axis) so it doesn't collide with tick labels
+        y_pos = val + axis_range * 0.03
+        va = "bottom"
     ax1.text(bar.get_x() + bar.get_width() / 2, y_pos,
-             f"${val:,.0f}", ha="center", fontsize=13,
+             f"${val:,.0f}", ha="center", va=va, fontsize=13,
              fontweight="bold",
              color="#333333")
 
@@ -171,17 +185,21 @@ ax2.set_axisbelow(True)
 ax2.spines["top"].set_visible(False)
 ax2.spines["right"].set_visible(False)
 
-# Value labels on the bars
+# Value labels on the bars -- for negative bars, put the label INSIDE
+# the bar (above the base) so it doesn't collide with the x-axis labels
+max_val = max(blanket_vals + targeted_vals)
+label_offset = max_val * 0.02
+
 for b, v in zip(bars1, blanket_vals):
-    ax2.text(b.get_x() + b.get_width() / 2,
-             v + (max(blanket_vals + targeted_vals) * 0.02
-                  if v >= 0 else max(blanket_vals + targeted_vals) * -0.06),
-             f"{v:,.0f}", ha="center", fontsize=8, color="#555555")
+    y_pos = v + label_offset if v >= 0 else v + label_offset
+    ax2.text(b.get_x() + b.get_width() / 2, y_pos,
+             f"{v:,.0f}", ha="center", va="bottom",
+             fontsize=8, color="#555555")
 for b, v in zip(bars2, targeted_vals):
-    ax2.text(b.get_x() + b.get_width() / 2,
-             v + (max(blanket_vals + targeted_vals) * 0.02
-                  if v >= 0 else max(blanket_vals + targeted_vals) * -0.06),
-             f"{v:,.0f}", ha="center", fontsize=8, color="#333333",
+    y_pos = v + label_offset if v >= 0 else v + label_offset
+    ax2.text(b.get_x() + b.get_width() / 2, y_pos,
+             f"{v:,.0f}", ha="center", va="bottom",
+             fontsize=8, color="#333333",
              fontweight="bold")
 
 plt.suptitle(
