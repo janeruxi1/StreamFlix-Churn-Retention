@@ -23,6 +23,8 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.decisions.ltv import LTV_BY_TIER   # KM-derived; see src/decisions/ltv.py
+
 
 # ---------------------------------------------------------------------
 # Assumptions (curated with the PM in reports/scenario_brief.md)
@@ -33,12 +35,9 @@ INTERVENTION_MENU: Dict[str, Dict[str, float]] = {
     "premium_upgrade":  {"cost": 12.0, "uplift": 0.25},
 }
 
-# LTV = monthly revenue x expected months retained (per plan tier)
-LTV_BY_TIER: Dict[str, float] = {
-    "Basic":     9.0  *  8,   # $72
-    "Standard": 14.0 * 10,    # $140
-    "Premium":  19.0 * 12,    # $228
-}
+# LTV_BY_TIER imported from src/decisions/ltv.py -- derived from Phase 2's
+# Kaplan-Meier survival curves via restricted mean survival time (24-month
+# horizon). Current values: Basic $200, Standard $315, Premium $435.
 
 # Guardrail: premium_upgrade can be offered to at most this fraction
 # of subscribers per month (avoid margin compression)
