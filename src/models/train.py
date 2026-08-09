@@ -6,8 +6,11 @@ Trainers + prep helper:
     train_xgboost              -- gradient-boosted trees
     train_random_forest        -- bagged trees, different bias-variance
     train_hist_gbm             -- sklearn's native GBM implementation
-    tune_xgboost_optuna        -- Bayesian hyperparameter tuning
-    calibrate_xgboost          -- Platt / isotonic post-hoc calibration
+                                  (v1.1: PRODUCTION MODEL after bake-off flip)
+    tune_xgboost_optuna        -- Bayesian hyperparameter tuning (XGBoost)
+    tune_hist_gbm_optuna       -- Bayesian hyperparameter tuning (HistGBM)
+    calibrate_model            -- Platt / isotonic post-hoc calibration
+                                  (works with any prefit sklearn estimator)
 
 Design principles:
     - Stateless: no hidden train/test leakage. The one piece of state
@@ -237,14 +240,17 @@ def tune_xgboost_optuna(X_train: pd.DataFrame,
 # ---------------------------------------------------------------------
 # Calibration wrapper
 # ---------------------------------------------------------------------
-def calibrate_xgboost(base_model: XGBClassifier,
-                      X_calib: pd.DataFrame,
-                      y_calib: pd.Series,
-                      method: str = "sigmoid") -> CalibratedClassifierCV:
-    """Wrap a prefit XGBoost with Platt (sigmoid) or isotonic calibration.
+def calibrate_model(base_model,
+                    X_calib: pd.DataFrame,
+                    y_calib: pd.Series,
+                    method: str = "sigmoid") -> CalibratedClassifierCV:
+    """Wrap a prefit sklearn-compatible model with Platt or isotonic calibration.
+
+    Works with any prefit estimator that implements `predict_proba` --
+    XGBoost, HistGBM, RandomForest, LogisticRegression, etc.
 
     Fits the calibrator on a held-out calibration set without retraining
-    the base XGBoost. Compatible with both legacy sklearn (<1.6) using
+    the base model. Compatible with both legacy sklearn (<1.6) using
     `cv='prefit'` and modern sklearn (>=1.6) using `FrozenEstimator`.
 
     Default 'sigmoid' (Platt): monotonic transform, preserves the model's
@@ -269,3 +275,72 @@ def calibrate_xgboost(base_model: XGBClassifier,
         )
     calibrated.fit(X_calib, y_calib)
     return calibrated
+
+
+# Backwards-compatible alias -- earlier code imported the XGBoost-specific
+# name. calibrate_model was always generic; this alias keeps old imports
+# working.
+calibrate_xgboost = calibrate_model
+
+
+# ---------------------------------------------------------------------
+# HistGBM Optuna tuner (v1.1: parallel to tune_xgboost_optuna)
+# ---------------------------------------------------------------------
+def tune_hist_gbm_optuna(X_train: pd.DataFrame,
+                         y_train: pd.Series,
+                         X_val: pd.DataFrame,
+                         y_val: pd.Series,
+                         n_trials: int = 25,
+                         random_state: int = 42):
+    """Bayesian hyperparameter tuning for HistGradientBoosting via Optuna.
+
+    Same pattern as tune_xgboost_optuna: TPE sampler, log-scale priors for
+    learning rate and regularization, PR-AUC objective on a held-out
+    validation set.
+
+    Search space is HistGBM's actual hyperparameter surface (fewer knobs
+    than XGBoost -- no L1, no gamma, no min_child_weight equivalent, just
+    L2 + tree structure + learning rate).
+
+    Returns (fitted_best_model, best_params_dict).
+    """
+    try:
+        import optuna
+        from sklearn.metrics import average_precision_score
+    except ImportError:
+        raise ImportError(
+            "Optuna not installed. `pip install optuna` to enable "
+            "hyperparameter tuning."
+        )
+
+    def objective(trial):
+        params = {
+            "max_iter": trial.suggest_int("max_iter", 100, 500, step=50),
+            "max_depth": trial.suggest_int("max_depth", 3, 8),
+            "learning_rate": trial.suggest_float(
+                "learning_rate", 0.01, 0.15, log=True),
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 10, 100),
+            "l2_regularization": trial.suggest_float(
+                "l2_regularization", 0.01, 10.0, log=True),
+        }
+        model = HistGradientBoostingClassifier(
+            **params,
+            random_state=random_state,
+        )
+        model.fit(X_train, y_train)
+        val_proba = model.predict_proba(X_val)[:, 1]
+        return average_precision_score(y_val, val_proba)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=random_state),
+    )
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    best_model = HistGradientBoostingClassifier(
+        **study.best_params,
+        random_state=random_state,
+    )
+    best_model.fit(X_train, y_train)
+    return best_model, study.best_params

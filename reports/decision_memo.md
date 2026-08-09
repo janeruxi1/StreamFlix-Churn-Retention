@@ -34,7 +34,7 @@ The blanket approach fails because most m11 users weren't going to churn anyway.
 
 Replace the blanket campaign with a **cost-aware targeting policy** built on three components:
 
-1. **A calibrated churn model** (XGBoost + Platt calibration) that produces a probability for every subscriber in the base
+1. **A calibrated churn model** (HistGradientBoosting + Platt calibration) that produces a probability for every subscriber in the base
 2. **A per-user expected-value calculation** across a menu of three interventions: curated playlist ($1), $5 credit, Premium upgrade ($12)
 3. **A budget-capped allocation rule** that targets users in descending order of expected value until spend is exhausted
 
@@ -94,7 +94,21 @@ This is the mechanic that makes the ROI story work — most m11 users the blanke
 
 **Model discrimination is modest.** PR-AUC = 0.17, ROC-AUC = 0.74, top-10% lift = 3.5× (see the lift chart above — steep decay from 3.5× at the top decile to 1.0× at the bottom, monotonic throughout, which is what a healthy ranking model looks like). The synthetic training data has no unmeasured interactions that a real production dataset would provide. In practice, we'd expect the model to improve as event-stream features (browsing, video-completion rates, notification opens) come online.
 
-**Budget doesn't currently bind.** Only ~13% of subscribers have any positive-EV lever, so the full targeted spend is $18.4k — far below the $200k cap. Adding budget doesn't buy more targeting on this data; we'd need either a stronger model or higher-uplift interventions.
+**Budget doesn't currently bind — and that's a deliberate distinction between operating budget and governance ceiling.** Only ~13% of subscribers have any positive-EV lever, so the full targeted spend is $18.4k — far below the $200k cap. The budget-vs-ROI curve from the sweep in Phase 6 tells the story:
+
+| Budget | Users targeted | Spend | Net EV | ROI |
+|---|---|---|---|---|
+| $10k | 1,007 | $10k | $14.7k | **2.47×** (peak) |
+| $30k | 6,313 | $18k | $17.7k | 1.96× (plateau) |
+| $50k–$200k | 6,313 | $18k | $17.7k | 1.96× (dormant) |
+
+Two useful reads on this:
+
+- **Operating budget ≈ $30k.** That's the point where marginal spend stops adding value at current model quality. Everything above earns 0 additional EV.
+- **Governance ceiling = $200k.** Acts as a circuit-breaker for pathological cases (data anomaly, model bug that recommends spamming everyone). Doesn't bind under normal operation — but you want a hard stop, especially for a first production deployment.
+- **The trade-off:** at $10k budget, ROI peaks at 2.47× but total EV is $3k lower. At $30k, ROI is 1.96× but total EV is maximized. Which to optimize depends on the CFO's answer to *"do we care more about ROI-per-dollar or total dollar impact?"* — for a v1 launch, I'd recommend the $30k operating budget (maximize total impact) with the $200k governance ceiling in place.
+
+**Adding budget above ~$30k doesn't buy more targeting on this data;** we'd need either a stronger model (event-stream features would push more users above the EV threshold) or higher-uplift interventions to grow the target set. The gap between $30k operating and $200k ceiling is the growth headroom.
 
 **LTV is derived from the Kaplan-Meier survival curves in Phase 2, not guessed.** Per plan tier, we compute restricted mean survival time (RMST) to a 24-month horizon and multiply by monthly revenue. Current values: **Basic $200, Standard $315, Premium $435** (see `src/decisions/ltv.py`; drift-detection test in `tests/test_ltv.py`). This replaces the earlier ballpark defaults ($72/$140/$228) that assumed strong tier-differentiated churn without checking the data. The KM-derived numbers show more modest tier differentiation because 24-month survival probabilities are all in the 92-96% band — Premium retains longer, but by less than casual intuition suggests. Every downstream number in this memo uses the derived LTV.
 
