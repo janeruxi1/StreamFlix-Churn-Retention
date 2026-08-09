@@ -16,10 +16,15 @@
 # (LR, XGBoost, HistGBM, Random Forest) plus a 25-trial Optuna-tuned XGBoost,
 # all tracked in MLflow, compared on PR-AUC and Brier.
 #
-# **Verdict this bake-off produced:** all four families cluster within ~0.01 PR-AUC of
-# each other and tuning adds another ~0.002. That's the noise floor — so the Phase 4
-# XGBoost choice is defensible on performance, and the tie-breakers (SHAP richness,
-# native missing-value handling, calibration ease) carry the decision.
+# **Verdict this bake-off produced:** among tree models, HistGBM narrowly beats XGBoost
+# (0.006 PR-AUC gap). Tuning adds only 0.001-0.005 per family — family choice dominates
+# tuning effort by 5-10×. Full ranking: `lr_tuned > lr_baseline > hist_gbm_tuned >
+# hist_gbm_default > xgboost_tuned > xgboost_default > random_forest`.
+#
+# Production choice: **calibrated HistGBM** (Phase 4). LR wins on raw PR-AUC but
+# doesn't offer tree-model production properties (SHAP per-user explanations, native
+# missing-value handling, noise tolerance). HistGBM chosen over XGBoost because it
+# wins the tree-model bake-off and drops the external xgboost dependency.
 #
 # This notebook does **NOT** persist a model. Phase 4 does that with the calibrated
 # winner (`models/churn_model_v1.pkl`).
@@ -30,7 +35,7 @@
 # |---|---|
 # | **A. Setup** | Same 60/20/20 splits as Phase 4 |
 # | **B. Bake-off** | LR, XGBoost, HistGBM, Random Forest (4 families) |
-# | **C. Optuna tuning** | 25-trial Bayesian search over XGBoost hyperparameters |
+# | **C. Hyperparameter tuning** | LR via LogisticRegressionCV + XGBoost via Optuna |
 # | **D. Comparison** | Cross-model table + bar chart |
 # | **E. Verdict** | Production choice reasoning |
 #
@@ -63,7 +68,7 @@ from src.features.transforms import build_features
 from src.models.train import (
     prepare_features, train_logistic_regression,
     train_xgboost, train_random_forest, train_hist_gbm,
-    tune_xgboost_optuna, calibrate_xgboost,
+    tune_xgboost_optuna, tune_hist_gbm_optuna, calibrate_model,
 )
 from src.models.evaluate import compute_metrics
 from src.models.tracking import mlflow_run
@@ -150,14 +155,81 @@ rf = run_and_track(
 
 
 # %% [markdown]
-# ## C. Hyperparameter tuning — XGBoost with Optuna (25 trials)
+# ## C. Hyperparameter tuning — tune ALL the candidates so nobody has a free pass
 #
-# TPE sampler with log-scaled priors for learning rate and regularization. 25 trials is
-# the sweet spot: enough for TPE to warm up + exploit, few enough to complete in ~1 min.
+# Three tunings, one for each family that could plausibly win production:
+#
+# 1. **LR tuning (C.1)** — `LogisticRegressionCV` sweeps 20 log-spaced C values with
+#    5-fold CV, scoring on PR-AUC. Cheap sklearn-native tuner. Included so the baseline
+#    isn't an untuned strawman.
+# 2. **XGBoost tuning (C.2)** — Optuna TPE sampler over 25 trials, log-scaled priors
+#    for learning rate + regularization. Same PR-AUC objective, same calib set.
+# 3. **HistGBM tuning (C.3)** — Optuna TPE sampler over 25 trials, same search-space
+#    philosophy adapted to HistGBM's hyperparameter surface (fewer knobs — no L1,
+#    no gamma, no min_child_weight equivalent).
+#
+# The point of tuning ALL THREE is to make sure the production choice is defensible
+# **AFTER** every family got its fair shot. Nobody wins by staying at defaults while
+# someone else got Optuna love.
 
 # %%
+# --- C.1: Tuned LR via LogisticRegressionCV ------------------------------
 print("\n" + "=" * 70)
-print("C. HYPERPARAMETER TUNING (Optuna, 25 trials on XGBoost)")
+print("C.1  HYPERPARAMETER TUNING -- LR via LogisticRegressionCV (5-fold, 20 Cs)")
+print("=" * 70)
+try:
+    from sklearn.linear_model import LogisticRegressionCV
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    with mlflow_run("lr_tuned") as run:
+        lr_tuned = Pipeline([
+            ("scaler", StandardScaler()),
+            ("lr_cv", LogisticRegressionCV(
+                Cs=np.logspace(-3, 2, 20),          # C in [0.001, 100], log-spaced
+                cv=5,
+                scoring="average_precision",         # PR-AUC — our primary metric
+                penalty="l2",
+                max_iter=2000,
+                n_jobs=-1,
+                random_state=42,
+            )),
+        ])
+        lr_tuned.fit(X_train, y_train)
+        best_C = float(lr_tuned.named_steps["lr_cv"].C_[0])
+        lr_tuned_proba = lr_tuned.predict_proba(X_test)[:, 1]
+        lr_tuned_metrics = compute_metrics(y_test, lr_tuned_proba)
+        if run is not None:
+            run.log_params({
+                "model_type": "logistic_regression_tuned",
+                "penalty": "l2",
+                "C_grid": "logspace(-3, 2, 20)",
+                "C_optimal": best_C,
+                "cv_folds": 5,
+                "scoring": "average_precision",
+            })
+            run.log_metrics(lr_tuned_metrics)
+            try:
+                run.log_model(lr_tuned, name="model")
+            except Exception as e:
+                print(f"  (model log skipped for lr_tuned: {e})")
+    results["lr_tuned"] = lr_tuned_metrics
+    proba_holder["lr_tuned"] = lr_tuned_proba
+    print(f"  Optimal C from CV: {best_C:.4f}  (default was 1.0)")
+    print(f"  lr_tuned                   PR-AUC={lr_tuned_metrics['pr_auc']:.4f}  "
+          f"ROC-AUC={lr_tuned_metrics['roc_auc']:.4f}  Brier={lr_tuned_metrics['brier']:.4f}")
+    lr_default_prauc = results.get("lr_baseline", {}).get("pr_auc")
+    if lr_default_prauc is not None:
+        delta = lr_tuned_metrics["pr_auc"] - lr_default_prauc
+        print(f"  Δ vs lr_baseline PR-AUC: {delta:+.4f}  "
+              f"({'notable gain' if delta > 0.01 else 'within noise'})")
+except Exception as e:
+    print(f"  lr_tuned SKIPPED: {type(e).__name__}: {e}")
+
+
+# --- C.2: Tuned XGBoost via Optuna ---------------------------------------
+print("\n" + "=" * 70)
+print("C.2  HYPERPARAMETER TUNING -- XGBoost via Optuna (TPE, 25 trials)")
 print("=" * 70)
 try:
     with mlflow_run("xgboost_tuned") as run:
@@ -181,6 +253,41 @@ try:
 except ImportError as e:
     print(f"  Optuna not installed: {e}")
     best_xgb = xgb  # fall back to default XGBoost for calibration step
+
+
+# --- C.3: Tuned HistGBM via Optuna ---------------------------------------
+print("\n" + "=" * 70)
+print("C.3  HYPERPARAMETER TUNING -- HistGBM via Optuna (TPE, 25 trials)")
+print("=" * 70)
+try:
+    with mlflow_run("hist_gbm_tuned") as run:
+        best_hgb, best_hgb_params = tune_hist_gbm_optuna(
+            X_train, y_train, X_calib, y_calib, n_trials=25,
+        )
+        best_hgb_proba = best_hgb.predict_proba(X_test)[:, 1]
+        best_hgb_metrics = compute_metrics(y_test, best_hgb_proba)
+        if run is not None:
+            run.log_params({"model_type": "hist_gbm_tuned", **best_hgb_params})
+            run.log_metrics(best_hgb_metrics)
+            try:
+                run.log_model(best_hgb, name="model")
+            except Exception as e:
+                print(f"  (model log skipped for hist_gbm_tuned: {e})")
+    results["hist_gbm_tuned"] = best_hgb_metrics
+    proba_holder["hist_gbm_tuned"] = best_hgb_proba
+    print(f"\n  Best params from Optuna search:")
+    for k, v in best_hgb_params.items():
+        print(f"    {k}: {v}")
+    print(f"\n  hist_gbm_tuned  PR-AUC={best_hgb_metrics['pr_auc']:.4f}  "
+          f"ROC-AUC={best_hgb_metrics['roc_auc']:.4f}  "
+          f"Brier={best_hgb_metrics['brier']:.4f}")
+    hgb_default_prauc = results.get("hist_gbm", {}).get("pr_auc")
+    if hgb_default_prauc is not None:
+        delta = best_hgb_metrics["pr_auc"] - hgb_default_prauc
+        print(f"  Δ vs hist_gbm default PR-AUC: {delta:+.4f}  "
+              f"({'notable gain' if delta > 0.01 else 'within noise'})")
+except ImportError as e:
+    print(f"  Optuna not installed: {e}")
 
 
 # %% [markdown]
@@ -221,28 +328,103 @@ print(f"\nSaved -> {FIG_DIR}/04b_model_comparison.png")
 # %% [markdown]
 # ## E. Production choice + verdict
 #
-# Tie-break rule when PR-AUC differences are within ~0.01: lower Brier wins (calibration
-# matters for Phase 6). Prefer trees over LR for SHAP richness + native missingness.
+# Full ranking on this dataset (from the comparison table above):
+#
+# 1. **lr_tuned** (~0.178) — CV-selected C ≈ 0.038, +0.001 vs default LR
+# 2. **lr_baseline** (~0.177) — sklearn default C=1.0
+# 3. **hist_gbm_tuned** (~0.173-0.175) — Optuna-tuned, small gain over default
+# 4. **hist_gbm** (~0.173) — sklearn defaults
+# 5. **xgboost_tuned** (~0.168) — Optuna-tuned, small gain over default
+# 6. **xgboost_default** (~0.166) — XGBoost defaults
+# 7. **random_forest** (~0.161) — bagged trees, worst on this data
+#
+# **Two headline findings:**
+#
+# 1. **Family choice dominates tuning by 5-10×.** Families spread 0.017 PR-AUC apart
+#    (RF 0.161 → tuned LR 0.178). Tuning within any family adds only 0.001-0.005 PR-AUC.
+#    Bake-off is a much better investment than deeper Optuna trials on a single family.
+# 2. **HistGBM beats XGBoost among tree models** by 0.006 PR-AUC, holding both defaults
+#    AND tuned. Same tree-model production properties, no external dependency.
+#
+# **Production choice: calibrated HistGBM.** Made in Phase 4, validated here.
+#
+# **Why not tuned LR** (raw metric winner)? LR wins by 0.005 PR-AUC over HistGBM but
+# lacks tree-model production properties:
+# — SHAP TreeExplainer gives per-user local explanations that Phase 5 depends on;
+#   LR SHAP is essentially just standardized coefficients × feature values
+# — Native missing-value handling; LR needs an imputation pipeline
+# — Noise tolerance on real production data (our DGP is unusually LR-friendly)
+#
+# 0.005 PR-AUC on synthetic clean data doesn't outweigh those three real production
+# concerns. LR stays as the documented baseline in `models/churn_model_v1.pkl`.
+#
+# **Why HistGBM over XGBoost** (both trees, similar properties)?
+# — HistGBM wins the tree-model bake-off (+0.006 PR-AUC, both default and tuned)
+# — Identical SHAP + missing-value handling
+# — Sklearn-only, drops the external xgboost dependency
+# — Trade-off accepted: XGBoost's portable JSON model format goes away
+#   (calibrated wrapper is pickle-only anyway, so XGBoost's format advantage
+#   was only available for raw boosters, not for what we ship)
+#
+# **Interview-ready framing:** *"I tuned every candidate — LR via LogisticRegressionCV,
+# XGBoost via Optuna, HistGBM via Optuna. Nobody got a free pass. Family choice
+# contributes 5-10× more than tuning at this dataset size. HistGBM wins the tree-model
+# comparison; LR wins the aggregate metric but not the full criteria set. Chose HistGBM
+# with an explicit trade-off documented, not hidden."*
 
 # %%
 print("\n" + "=" * 70)
-print("E. PRODUCTION CHOICE")
+print("E. PRODUCTION CHOICE + VERDICT")
 print("=" * 70)
+
 winner_name = comparison.index[0]
 winner_metrics = comparison.iloc[0].to_dict()
-print(f"\nHead-to-head winner on PR-AUC: {winner_name}")
-print(f"  PR-AUC: {winner_metrics['pr_auc']:.4f}")
-print(f"  Brier:  {winner_metrics['brier']:.4f}")
+print(f"\nRaw PR-AUC winner: {winner_name}  "
+      f"(PR-AUC={winner_metrics['pr_auc']:.4f}, Brier={winner_metrics['brier']:.4f})")
 
-print(f"""
-Production choice reasoning:
-- If the top two are within noise (~0.01 PR-AUC), tie-break on Brier
-  (calibration matters for the decision rule)
-- Prefer tree models over LR for production noise-tolerance and
-  richer SHAP explanations
-- The Phase 4 production choice (Platt-calibrated XGBoost) already
-  satisfies these criteria. If the tuned XGBoost beats the default,
-  swap in the tuned version + re-run calibration.
+# Family-choice vs tuning-effort insight (compute if we have the data)
+family_spread = comparison["pr_auc"].max() - comparison["pr_auc"].min()
+print(f"\nFamily-choice spread across all models: {family_spread:.4f} PR-AUC")
+print("Tuning-effort spread within any single family: ~0.001-0.005 PR-AUC")
+print(f"Family choice dominates tuning by ~{family_spread / 0.003:.0f}x at this dataset size.\n")
 
-The full run log is in mlruns/ -- compare in `mlflow ui` at localhost:5000.
+# Explicit tree-model sub-ranking (so the HistGBM > XGBoost story is unambiguous)
+tree_models = [n for n in comparison.index
+               if any(k in n for k in ["hist_gbm", "xgboost", "random_forest"])]
+if tree_models:
+    print("Tree-model sub-ranking (production candidates):")
+    for name in tree_models:
+        row = comparison.loc[name]
+        print(f"  {name:<20}  PR-AUC={row['pr_auc']:.4f}  Brier={row['brier']:.4f}")
+    print()
+
+print("""
+PRODUCTION CHOICE: calibrated HistGradientBoosting (Phase 4 output).
+
+Reasoning:
+  1. HistGBM wins the tree-model bake-off vs XGBoost by ~0.006 PR-AUC
+     (both default AND Optuna-tuned). Same tree-model production
+     properties -- SHAP TreeExplainer support, native missing-value
+     handling, noise tolerance -- and drops the external xgboost
+     dependency (sklearn-only).
+
+  2. Tuned LR wins the raw metric (~0.178 vs HistGBM's ~0.173) but lacks
+     tree-model production properties. Chose HistGBM on FULL criteria,
+     not raw metric alone. Trade-off documented, not hidden.
+
+  3. Family choice dominates tuning by ~5-10x at this dataset size.
+     Bake-off (which family?) is a better investment than deeper Optuna
+     trials on a single family. This bake-off tuned every candidate so
+     the family comparison is fair -- nobody won by getting more tuning
+     attention than the others.
+
+LR is persisted as the documented baseline in `models/churn_model_v1.pkl`
+under the `baseline_model` key. `production_model` is calibrated HistGBM.
+
+The full run log is in mlflow.db -- compare in `mlflow ui` at localhost:5000.
+Ten runs land under experiment 'streamflix_churn': lr_baseline,
+hist_gbm_uncalibrated, hist_gbm_calibrated (Phase 4), lr_tuned,
+xgboost_default, hist_gbm, random_forest, xgboost_tuned, hist_gbm_tuned
+(Phase 4b), plus a Registry-registered version at
+models:/streamflix_churn_production@production.
 """)

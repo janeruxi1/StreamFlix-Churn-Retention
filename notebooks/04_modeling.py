@@ -9,15 +9,31 @@
 # ---
 
 # %% [markdown]
-# # Phase 4 — Production Modeling: LR baseline → XGBoost → Calibration
+# # Phase 4 — Production Modeling: LR baseline → HistGBM → Calibration
 #
 # **Goal:** produce a calibrated `P(churn | features)` that the Phase 6 decision rule can
 # multiply by LTV. Calibration is a first-class metric here, not an afterthought.
 #
-# The **XGBoost family choice is validated by Phase 4b's systematic bake-off**
-# (4 families + 25-trial Bayesian tuning). This notebook takes that winner and builds the
-# production-quality artifact: calibrated, evaluated on held-out data, persisted to
-# `models/churn_model_v1.pkl` for the Streamlit app and Phase 5-7 to consume.
+# **HistGBM (sklearn's HistGradientBoostingClassifier) is the production choice**,
+# validated by Phase 4b's systematic bake-off (4 model families + 3 tuned variants:
+# LR via LogisticRegressionCV, XGBoost via Optuna, HistGBM via Optuna). Key findings:
+#
+# - **HistGBM beats XGBoost by 0.006 PR-AUC** on this dataset (0.173 vs 0.166)
+# - **Tuning barely moved anything** (~0.001-0.005 per family) — family choice
+#   dominates tuning effort by 5-10×
+# - Among tree models, HistGBM wins on the metric AND has identical production
+#   properties: SHAP TreeExplainer support, native missing-value handling, tree-based
+#   noise tolerance
+# - Bonus: drops the external `xgboost` dependency (sklearn-only) — one less thing
+#   to version-manage
+#
+# **Trade-off called out honestly:** the raw metric winner across ALL models is tuned
+# LR (~0.178), not any tree model. Chose HistGBM anyway because:
+# 1. **SHAP richness** — tree structure enables per-user local explanations (Phase 5)
+# 2. **Native missing-value handling** — LR needs an imputation pipeline
+# 3. **Real-data noise tolerance** — tree models degrade more gracefully than linear
+#
+# See `notebooks/04b_model_comparison.py` Section E for the full ranking + rationale.
 #
 # **Chronologically, Phase 4b's bake-off runs BEFORE this notebook** (family selection).
 # Phase 4 is numbered/presented first because it's the deployment story a PM or
@@ -29,13 +45,13 @@
 # |---|---|
 # | **A. Setup** | Load engineered data, prepare features, three-way split |
 # | **B. LR baseline** | Regularized logistic regression on the same features |
-# | **C. XGBoost (uncalibrated)** | Boosted trees, default hyperparams |
-# | **D. XGBoost + Platt calibration** | Sigmoid calibration on held-out calib set |
+# | **C. HistGBM (uncalibrated)** | Sklearn-native gradient boosting, default hyperparams |
+# | **D. HistGBM + Platt calibration** | Sigmoid calibration on held-out calib set |
 # | **E. Discrimination curves** | PR + ROC overlay for all three models |
 # | **F. Calibration curves** | Reliability diagrams before vs after |
 # | **G. Top-K targeting** | Precision/recall at K% — direct input to Phase 6 |
 # | **H. Cumulative gain + lift chart** | Business-vocabulary view: lift @ top K vs random |
-# | **I. Verdict + persistence** | Pick production model, save to `models/churn_model_v1.pkl` |
+# | **I. Verdict + persistence** | Save calibrated HistGBM to `models/churn_model_v1.pkl` |
 #
 # All figures saved under `reports/figures/`.
 
@@ -67,7 +83,7 @@ from src.data.loader import load_subscribers
 from src.features.transforms import build_features
 from src.models.train import (
     prepare_features, train_logistic_regression,
-    train_xgboost, calibrate_xgboost,
+    train_hist_gbm, calibrate_model,
 )
 from src.models.evaluate import (
     compute_metrics, top_k_metrics, calibration_curve_points,
@@ -141,70 +157,76 @@ for k, v in lr_metrics.items():
 
 
 # %% [markdown]
-# ## C. XGBoost (uncalibrated)
+# ## C. HistGBM (uncalibrated)
+#
+# `HistGradientBoostingClassifier` — sklearn's native histogram-based gradient boosting.
+# Chosen over XGBoost after Phase 4b's bake-off showed HistGBM beats XGBoost by 0.006
+# PR-AUC on this data, has identical tree-model production properties (SHAP + missing
+# values + noise tolerance), and drops the external `xgboost` dependency (sklearn only).
 
 # %%
 print("\n" + "=" * 70)
-print("C. XGBOOST (UNCALIBRATED)")
+print("C. HISTGBM (UNCALIBRATED)")
 print("=" * 70)
-with mlflow_run("xgboost_uncalibrated") as run:
-    xgb = train_xgboost(X_train, y_train)
-    xgb_proba_test = xgb.predict_proba(X_test)[:, 1]
-    xgb_metrics = compute_metrics(y_test, xgb_proba_test)
+with mlflow_run("hist_gbm_uncalibrated") as run:
+    hgb = train_hist_gbm(X_train, y_train)
+    hgb_proba_test = hgb.predict_proba(X_test)[:, 1]
+    hgb_metrics = compute_metrics(y_test, hgb_proba_test)
     if run is not None:
         run.log_params({
-            "model_type": "xgboost",
-            "n_estimators": 300, "max_depth": 5, "learning_rate": 0.05,
-            "subsample": 0.85, "colsample_bytree": 0.85,
-            "min_child_weight": 5, "reg_lambda": 1.0,
-            "objective": "binary:logistic", "eval_metric": "aucpr",
+            "model_type": "hist_gbm",
+            "max_iter": 300, "max_depth": 5, "learning_rate": 0.05,
+            "min_samples_leaf": 25, "l2_regularization": 1.0,
             "n_train": len(X_train), "n_features": X_train.shape[1],
         })
-        run.log_metrics(xgb_metrics)
-        run.log_model(xgb, name="model")
+        run.log_metrics(hgb_metrics)
+        run.log_model(hgb, name="model")
 print("Metrics on test set:")
-for k, v in xgb_metrics.items():
+for k, v in hgb_metrics.items():
     print(f"  {k:<10} {v:.4f}")
 
 
 # %% [markdown]
-# ## D. XGBoost + Platt (sigmoid) calibration
+# ## D. HistGBM + Platt (sigmoid) calibration
 #
 # **Platt over isotonic:** monotonic transform preserves ranking metrics (PR-AUC and
 # ROC-AUC are invariant under monotonic transforms). Isotonic is more flexible but
 # creates probability ties that hurt ranking on small positive classes.
+#
+# `calibrate_model()` is model-agnostic — works on any prefit sklearn estimator,
+# including HistGBM (previously named `calibrate_xgboost`; renamed since it's generic).
 
 # %%
 print("\n" + "=" * 70)
-print("D. XGBOOST + PLATT (SIGMOID) CALIBRATION")
+print("D. HISTGBM + PLATT (SIGMOID) CALIBRATION")
 print("=" * 70)
-with mlflow_run("xgboost_calibrated") as run:
-    xgb_cal = calibrate_xgboost(xgb, X_calib, y_calib, method="sigmoid")
-    xgb_cal_proba_test = xgb_cal.predict_proba(X_test)[:, 1]
-    xgb_cal_metrics = compute_metrics(y_test, xgb_cal_proba_test)
+with mlflow_run("hist_gbm_calibrated") as run:
+    hgb_cal = calibrate_model(hgb, X_calib, y_calib, method="sigmoid")
+    hgb_cal_proba_test = hgb_cal.predict_proba(X_test)[:, 1]
+    hgb_cal_metrics = compute_metrics(y_test, hgb_cal_proba_test)
     winner_run_id = None
     if run is not None:
         run.log_params({
-            "model_type": "xgboost_calibrated",
+            "model_type": "hist_gbm_calibrated",
             "calibration_method": "sigmoid_platt",
             "n_calib": len(X_calib),
-            "base_run": "xgboost_uncalibrated",
+            "base_run": "hist_gbm_uncalibrated",
         })
-        run.log_metrics(xgb_cal_metrics)
-        run.log_model(xgb_cal, name="model")
+        run.log_metrics(hgb_cal_metrics)
+        run.log_model(hgb_cal, name="model")
         # Capture the run ID WHILE the run is active -- needed below for
         # the Registry promotion (mlflow.active_run() returns None after
         # the `with` block exits).
         winner_run_id = run.run_id
 
-# Promote the calibrated XGBoost to the MLflow Model Registry as the new
+# Promote the calibrated HistGBM to the MLflow Model Registry as the new
 # production version. Registers under a stable logical name so downstream
 # jobs can load `models:/streamflix_churn_production@production` without
 # hardcoding a run ID. Runs OUTSIDE the mlflow_run context (Registry API
 # operates on past runs by ID). Silently no-ops if MLflow isn't installed.
 register_production_model(winner_run_id, CHURN_MODEL_REGISTRY_NAME)
 print("Metrics on test set:")
-for k, v in xgb_cal_metrics.items():
+for k, v in hgb_cal_metrics.items():
     print(f"  {k:<10} {v:.4f}")
 
 # Comparison table
@@ -213,8 +235,8 @@ print("MODEL COMPARISON (test set)")
 print("-" * 70)
 comparison = pd.DataFrame({
     "logistic_regression":  lr_metrics,
-    "xgboost_uncal":        xgb_metrics,
-    "xgboost_calibrated":   xgb_cal_metrics,
+    "hist_gbm_uncal":       hgb_metrics,
+    "hist_gbm_calibrated":  hgb_cal_metrics,
 }).round(4)
 print(comparison)
 
@@ -233,8 +255,8 @@ print("=" * 70)
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 models = [
     ("LR baseline",          lr_proba_test,     "#5B8FF9"),
-    ("XGBoost (uncalibrated)", xgb_proba_test,   "#F6735B"),
-    ("XGBoost (calibrated)",  xgb_cal_proba_test, "#5AD8A6"),
+    ("HistGBM (uncalibrated)", hgb_proba_test,   "#F6735B"),
+    ("HistGBM (calibrated)",  hgb_cal_proba_test, "#5AD8A6"),
 ]
 
 # PR curve
@@ -334,7 +356,7 @@ print(f"\nUsing best model: XGBoost calibrated (test n={len(y_test):,})")
 k_values = [0.05, 0.10, 0.20, 0.30, 0.50]
 rows = []
 for k in k_values:
-    m = top_k_metrics(y_test, xgb_cal_proba_test, k=k)
+    m = top_k_metrics(y_test, hgb_cal_proba_test, k=k)
     rows.append({
         "top_k_pct":      f"{int(k*100):>3d}%",
         "n_targeted":     m["k_count"],
@@ -348,7 +370,7 @@ print(top_k_df.to_string(index=False))
 ks = np.linspace(0.01, 1.0, 50)
 precisions, recalls = [], []
 for k in ks:
-    m = top_k_metrics(y_test, xgb_cal_proba_test, k=k)
+    m = top_k_metrics(y_test, hgb_cal_proba_test, k=k)
     precisions.append(m["precision_at_k"])
     recalls.append(m["recall_at_k"])
 
@@ -391,7 +413,7 @@ print("H. CUMULATIVE GAIN + LIFT CHART")
 print("=" * 70)
 
 # Sort users by predicted probability descending
-proba = xgb_cal_proba_test
+proba = hgb_cal_proba_test
 order = np.argsort(-proba)
 y_sorted = y_test.values[order]
 
@@ -503,7 +525,7 @@ print("\n" + "=" * 70)
 print("I. VERDICT + MODEL PERSISTENCE")
 print("=" * 70)
 # Honest read on the comparison:
-#   - LR and XGBoost are within 1-2 PR-AUC points of each other -- noise
+#   - LR and HistGBM are within 1-2 PR-AUC points of each other -- noise
 #     level given a 5% positive class and a 10k test set
 #   - All three models have similar Brier scores (~0.047) -- already
 #     well-calibrated, so calibration didn't move the needle but also
@@ -511,7 +533,7 @@ print("=" * 70)
 #   - LR baseline is genuinely competitive -- a sign that Phase 3 feature
 #     engineering captured most of the non-linearity manually
 #
-# Production choice: calibrated XGBoost.
+# Production choice: calibrated HistGBM (validated by Phase 4b bake-off).
 # Why not LR even though it's slightly ahead on this dataset?
 #   (a) Real production data will be noisier and have unmeasured
 #       interactions; trees handle that more gracefully than linear models
@@ -519,12 +541,16 @@ print("=" * 70)
 #       for tree models than for LR coefficients
 #   (c) Native missing-value handling means new features that arrive with
 #       partial coverage won't break the pipeline
+# Why HistGBM specifically over XGBoost?
+#   (a) HistGBM beats XGBoost by 0.006 PR-AUC on this data (Phase 4b bake-off)
+#   (b) Same tree-model production properties (SHAP + missing values)
+#   (c) Sklearn-only -- drops the external xgboost dependency
 # Both models persisted -- LR is the documented baseline / sanity check.
 
-print(f"\nProduction model: XGBoost + Platt calibration")
-print(f"  PR-AUC:  {xgb_cal_metrics['pr_auc']:.4f}")
-print(f"  ROC-AUC: {xgb_cal_metrics['roc_auc']:.4f}")
-print(f"  Brier:   {xgb_cal_metrics['brier']:.4f}")
+print(f"\nProduction model: HistGBM + Platt calibration")
+print(f"  PR-AUC:  {hgb_cal_metrics['pr_auc']:.4f}")
+print(f"  ROC-AUC: {hgb_cal_metrics['roc_auc']:.4f}")
+print(f"  Brier:   {hgb_cal_metrics['brier']:.4f}")
 print(f"\nBaseline (persisted for reference): LR")
 print(f"  PR-AUC:  {lr_metrics['pr_auc']:.4f}")
 print(f"  ROC-AUC: {lr_metrics['roc_auc']:.4f}")
@@ -533,11 +559,11 @@ print(f"  Brier:   {lr_metrics['brier']:.4f}")
 # Persist to the path declared in src/models/production.py so the
 # Streamlit app + Phase 5-7 notebooks load exactly this artifact.
 artifact = {
-    CHURN_MODEL_ARTIFACT_KEY: xgb_cal,   # <- key that Streamlit + notebooks read
+    CHURN_MODEL_ARTIFACT_KEY: hgb_cal,   # <- calibrated HistGBM — Streamlit + notebooks read this
     "baseline_model":         lr,
     "feature_names":          list(X.columns),
     "metrics": {
-        "production": xgb_cal_metrics,
+        "production": hgb_cal_metrics,
         "baseline":   lr_metrics,
     },
     "training_meta": {

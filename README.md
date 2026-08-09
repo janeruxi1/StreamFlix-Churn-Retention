@@ -3,7 +3,7 @@
 [![Live Demo](https://img.shields.io/badge/Streamlit-Live%20Demo-FF4B4B?logo=streamlit)](https://janeruxi1-streamflix-churn-retention.streamlit.app/)
 ![CI](https://github.com/janeruxi1/StreamFlix-Churn-Retention/actions/workflows/ci.yml/badge.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Tests](https://img.shields.io/badge/tests-79%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-86%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 > **Cost-aware customer-retention system** for a streaming subscription business modeled on real subscription-economy dynamics (churn bands, tenure spikes, engagement cohorts, intervention menus). End-to-end: from a calibrated churn-probability model to an ROI-optimized intervention policy and a deployed decision-support tool. Sister project to [`StreamFlix-AB-Testing`](https://github.com/janeruxi1/StreamFlix-AB-Testing), built on the same StreamFlix context.
@@ -129,7 +129,7 @@ pip install -r requirements.txt
 python src/data/simulate.py                  # generate both CSVs (baseline + experiment)
 python notebooks/04_modeling.py              # train + persist the churn model (uses baseline)
 python notebooks/08_uplift_modeling.py      # train + persist the uplift model (uses experiment)
-pytest tests/                                # run the 79 unit tests
+pytest tests/                                # run the 86 unit tests
 streamlit run app/streamlit_app.py           # launch the decision-support app
 ```
 
@@ -147,7 +147,7 @@ Two tabs:
 - **Policy overview** — KPI row (users targeted, cost, net EV, ROI), head-to-head against the current blanket-m11 baseline, lever mix
 - **Per-user lookup** — pick a subscriber ID, see the risk score, diagnostic features, and recommended lever
 
-Sidebar controls let anyone poke at the budget, per-lever cost, uplift assumptions, and blanket-baseline parameters. The app imports directly from `src/`, so the math is the same as the notebooks and is protected by the same 79 unit tests. See [`app/README.md`](./app/README.md) for deployment to Streamlit Community Cloud.
+Sidebar controls let anyone poke at the budget, per-lever cost, uplift assumptions, and blanket-baseline parameters. The app imports directly from `src/`, so the math is the same as the notebooks and is protected by the same 86 unit tests. See [`app/README.md`](./app/README.md) for deployment to Streamlit Community Cloud.
 
 **Live demo:** [https://janeruxi1-streamflix-churn-retention.streamlit.app/](https://janeruxi1-streamflix-churn-retention.streamlit.app/)
 
@@ -187,7 +187,7 @@ MLflow is an optional dependency; if it isn't installed, both the tracking calls
 
 ## 🧪 Testing & CI
 
-The `src/` modules are covered by **72 pytest unit tests** that run on every push via GitHub Actions across Python 3.10, 3.11, and 3.12. Coverage spans:
+The `src/` modules are covered by **86 pytest unit tests** that run on every push via GitHub Actions across Python 3.10, 3.11, and 3.12. Coverage spans:
 
 - Cost-aware decision rule (EV math, best-lever selection, budget cap, premium cap, blanket-baseline simulator, policy summary)
 - Feature engineering (idempotency, no-mutation, engineered-column ranges, tenure bucketing)
@@ -219,7 +219,7 @@ The project is built in 13 phases that mirror an end-to-end retention modeling w
 10. ✅ **Phase 8:** Uplift (causal) modeling — T/S/X-learners + Qini AUC *(v2: per-user retention lift replaces the fixed-uplift constant)*
 11. ✅ **Phase 9:** Head-to-head — v1 (propensity) vs v2 (uplift) scored against the simulator's ground-truth `true_uplift`
 12. ✅ **Phase 10:** Fairness / segment-parity audit — PR-AUC + Brier + calibration + recall parity across plan tier, tenure bucket, engagement cohort, country
-13. ✅ **Phase 11:** Production polish (79 unit tests, GitHub Actions CI, MIT license)
+13. ✅ **Phase 11:** Production polish (86 unit tests, GitHub Actions CI, MIT license)
 
 ---
 

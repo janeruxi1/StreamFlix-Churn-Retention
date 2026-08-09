@@ -209,20 +209,52 @@ def register_production_model(
 
     client = MlflowClient()
 
-    # Prefer the modern alias-based API (MLflow 2.9+)
+    # Wait for the model version to reach READY status before setting the
+    # alias. In MLflow 3.x, mlflow.register_model() can return before the
+    # version is fully committed to the store -- setting an alias on a
+    # PENDING version raises "model version does not exist" errors.
+    import time
+    for _ in range(20):  # up to 10 seconds of polling
+        try:
+            v_info = client.get_model_version(registered_model_name, version)
+            if v_info.status == "READY":
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    # Prefer the modern alias-based API (MLflow 2.9+).
+    # This block used to have `except Exception: pass` which silently swallowed
+    # the error and made "alias didn't land" indistinguishable from success.
+    # Now we capture the exception, verify the alias actually landed via
+    # readback, and print a manual-fix command if both paths fail.
+    modern_error = None
     try:
         client.set_registered_model_alias(
             name=registered_model_name,
             alias="production",
             version=version,
         )
-        print(f"  Registry: {registered_model_name} v{version} tagged @production")
-        return
-    except Exception:
-        # Fall through to legacy stage-based API
-        pass
+        # Verify by reading back — some MLflow versions accept the call but
+        # the alias doesn't actually persist. Trust nothing until confirmed.
+        readback = client.get_model_version_by_alias(
+            registered_model_name, "production"
+        )
+        if str(readback.version) == str(version):
+            print(f"  Registry: {registered_model_name} v{version} tagged @production (verified)")
+            return
+        else:
+            modern_error = (
+                f"alias-set succeeded but readback returned v{readback.version} "
+                f"instead of v{version}"
+            )
+    except Exception as e:
+        modern_error = f"{type(e).__name__}: {e}"
 
-    # Legacy stage-based API (deprecated in MLflow 2.9+ but still works)
+    print(f"  Registry: modern alias API failed for {registered_model_name} v{version} "
+          f"({modern_error}) -- falling through to legacy stage API")
+
+    # Legacy stage-based API (deprecated in MLflow 2.9+ but still works on 2.x)
     try:
         client.transition_model_version_stage(
             name=registered_model_name,
@@ -230,9 +262,18 @@ def register_production_model(
             stage="Production",
             archive_existing_versions=True,
         )
-        print(f"  Registry: {registered_model_name} v{version} @ Production stage")
-    except Exception as e:
-        print(f"  Registry: stage transition failed for {registered_model_name} v{version} ({e})")
+        print(f"  Registry: {registered_model_name} v{version} @ Production stage (legacy)")
+    except Exception as legacy_error:
+        print(
+            f"  Registry: BOTH alias AND stage APIs failed for {registered_model_name} v{version}.\n"
+            f"    Modern alias error: {modern_error}\n"
+            f"    Legacy stage error: {type(legacy_error).__name__}: {legacy_error}\n"
+            f"    Manual fix (paste into a Python shell / Jupyter cell):\n"
+            f"        from mlflow.tracking import MlflowClient\n"
+            f"        c = MlflowClient()\n"
+            f"        c.set_registered_model_alias("
+            f"'{registered_model_name}', 'production', {version})"
+        )
 
 
 @contextmanager
