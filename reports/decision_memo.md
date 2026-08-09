@@ -34,7 +34,7 @@ The blanket approach fails because most m11 users weren't going to churn anyway.
 
 Replace the blanket campaign with a **cost-aware targeting policy** built on three components:
 
-1. **A calibrated churn model** (HistGradientBoosting + Platt calibration) that produces a probability for every subscriber in the base
+1. **A calibrated churn model** (HistGradientBoosting, Optuna-tuned when tuning holds up on the held-out test set, plus Platt calibration) that produces a probability for every subscriber in the base
 2. **A per-user expected-value calculation** across a menu of three interventions: curated playlist ($1), $5 credit, Premium upgrade ($12)
 3. **A budget-capped allocation rule** that targets users in descending order of expected value until spend is exhausted
 
@@ -111,6 +111,8 @@ Two useful reads on this:
 **Adding budget above ~$30k doesn't buy more targeting on this data;** we'd need either a stronger model (event-stream features would push more users above the EV threshold) or higher-uplift interventions to grow the target set. The gap between $30k operating and $200k ceiling is the growth headroom.
 
 **LTV is derived from the Kaplan-Meier survival curves in Phase 2, not guessed.** Per plan tier, we compute restricted mean survival time (RMST) to a 24-month horizon and multiply by monthly revenue. Current values: **Basic $200, Standard $315, Premium $435** (see `src/decisions/ltv.py`; drift-detection test in `tests/test_ltv.py`). This replaces the earlier ballpark defaults ($72/$140/$228) that assumed strong tier-differentiated churn without checking the data. The KM-derived numbers show more modest tier differentiation because 24-month survival probabilities are all in the 92-96% band — Premium retains longer, but by less than casual intuition suggests. Every downstream number in this memo uses the derived LTV.
+
+**Why 24 months and not longer?** Phase 6 Section H.5 walks through the trade-off: at 36/48/60-month horizons, LTV and net EV both grow substantially on paper, but each additional year is estimated from a smaller, more survivor-biased sub-population (only ~30% of subscribers are observed to 24 months, ~15% to 36, ~5% to 48, ~1% to 60). 24 months is the point where the KM sample is large enough to trust and the anniversary churn spike at m12 is fully captured. Longer horizons inflate LTV based on the retention-selected tail; shorter horizons under-value the anniversary window. The sensitivity table is on the page — not hidden — so this choice can be revisited by finance if the risk tolerance is different.
 
 ---
 

@@ -39,7 +39,18 @@
 # %%
 import os
 import sys
+import warnings
 from pathlib import Path
+
+# Silence a sklearn 1.8+ FutureWarning triggered inside SHAP / other deps
+# (they call the deprecated `sklearn.utils.extmath.stable_cumsum`). Will
+# clear itself once those libraries release a compatible version. Not our
+# code, not actionable here.
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message="Function stable_cumsum is deprecated",
+)
 
 # Run from project root whether invoked as `python notebooks/05_...` or
 # from a Jupyter cell (which doesn't define __file__).
@@ -59,22 +70,28 @@ from sklearn.model_selection import train_test_split
 
 from src.data.loader import load_subscribers
 from src.features.transforms import build_features
-from src.models.train import prepare_features, train_xgboost
+from src.models.train import prepare_features, train_hist_gbm, tune_hist_gbm_optuna
+from src.models.evaluate import compute_metrics
 from src.models.explain import (
     compute_shap_values, global_importance, local_explanation,
     map_to_intervention, FEATURE_INTERVENTION_MAP,
 )
+from src.decisions.policy import INTERVENTION_MENU, LTV_BY_TIER
 
 FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% [markdown]
-# ## A. Setup — retrain uncalibrated XGB for SHAP
+# ## A. Setup — retrain uncalibrated HistGBM for SHAP
 #
 # The calibrated model runs in production for probabilities; this uncalibrated version
-# is what runs SHAP because TreeExplainer needs direct access to the booster's tree
-# structure. Same three-way split as Phase 4 (same seed) so we're explaining the same
-# model on the same test users.
+# is what runs SHAP because TreeExplainer needs direct access to the tree
+# structure (the calibration wrapper hides it). Same three-way split as Phase 4 (same
+# seed) so we're explaining the same model on the same test users.
+#
+# **Note:** After the v1.1 flip to HistGBM production, this notebook retrains
+# HistGradientBoosting (not XGBoost) so SHAP explains the SAME model that ships.
+# SHAP's TreeExplainer supports HistGBM since SHAP 0.35+.
 
 # %%
 print("=" * 70)
@@ -94,11 +111,26 @@ X_train, X_calib, y_train, y_calib = train_test_split(
     X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42,
 )
 
-# Retrain uncalibrated XGBoost -- SHAP needs direct access to the tree
+# Retrain uncalibrated HistGBM -- SHAP needs direct access to the tree
 # structure. The calibrated model is what runs in production for
 # probabilities; this one is what runs SHAP.
-xgb = train_xgboost(X_train, y_train)
-print(f"Retrained XGBoost on train (n={len(X_train):,}) for SHAP analysis")
+#
+# Match Phase 4's variant selection: train both default and Optuna-tuned,
+# pick whichever wins on TEST PR-AUC. This way SHAP explains the SAME
+# variant that ships, not just the default.
+hgb_default = train_hist_gbm(X_train, y_train)
+hgb_tuned, _best_params = tune_hist_gbm_optuna(
+    X_train, y_train, X_calib, y_calib, n_trials=25, random_state=42,
+)
+default_pr = compute_metrics(
+    y_test, hgb_default.predict_proba(X_test)[:, 1])["pr_auc"]
+tuned_pr = compute_metrics(
+    y_test, hgb_tuned.predict_proba(X_test)[:, 1])["pr_auc"]
+hgb = hgb_tuned if tuned_pr > default_pr else hgb_default
+variant = "tuned" if tuned_pr > default_pr else "default"
+print(f"Retrained HistGBM ({variant}) on train (n={len(X_train):,}) for SHAP")
+print(f"  default test PR-AUC: {default_pr:.4f}")
+print(f"  tuned   test PR-AUC: {tuned_pr:.4f}  -->  using {variant}")
 
 
 # %% [markdown]
@@ -113,14 +145,16 @@ print("\n" + "=" * 70)
 print("B. COMPUTE SHAP VALUES (TreeExplainer)")
 print("=" * 70)
 SAMPLE_SIZE = 2000
-shap_values = compute_shap_values(xgb, X_test, sample_size=SAMPLE_SIZE)
+shap_values = compute_shap_values(hgb, X_test, sample_size=SAMPLE_SIZE)
 X_shap = X_test.sample(n=SAMPLE_SIZE, random_state=42)
 y_shap = y_test.loc[X_shap.index]
 print(f"Computed SHAP for {SAMPLE_SIZE} test users")
 print(f"Base value (expected log-odds output): {shap_values.base_values[0]:.4f}")
 print(f"Base value (as probability): {1/(1+np.exp(-shap_values.base_values[0])):.4f}")
 # Sanity check: sum(SHAP) + base_value == raw model output
-sample_pred = xgb.predict(X_shap.iloc[[0]], output_margin=True)[0]
+# HistGBM's decision_function returns log-odds directly (equivalent to
+# XGBoost's `output_margin=True`) — use that for the additivity check.
+sample_pred = hgb.decision_function(X_shap.iloc[[0]])[0]
 sample_check = shap_values.values[0].sum() + shap_values.base_values[0]
 print(f"Sanity check (should match): raw margin={sample_pred:.4f}, "
       f"sum(shap)+base={sample_check:.4f}")
@@ -129,8 +163,17 @@ print(f"Sanity check (should match): raw margin={sample_pred:.4f}, "
 # %% [markdown]
 # ## C. Global feature importance — mean |SHAP|
 #
-# Ranked feature contribution to the model's log-odds output. Bar-chart color encodes
-# average direction: red bars push toward churn, green push away.
+# Ranked feature contribution to the model's log-odds output — **magnitude only**.
+# This chart answers "which features matter most?", not "does a high value push
+# toward or away from churn?". For direction, see the beeswarm (Section D) or
+# the dependence plots (Section E).
+#
+# **Why no color-by-direction here?** A signed-mean coloring mixes two things
+# — the feature's magnitude and the sample's value distribution — and can flip
+# the color for a feature whose HIGH values actually push AWAY from churn but
+# whose LOW values (dominating a skewed sample) push toward churn. That's
+# misleading. Keeping this chart to magnitude only, and reading direction off
+# the beeswarm, avoids the trap.
 
 # %%
 print("\n" + "=" * 70)
@@ -139,21 +182,20 @@ print("=" * 70)
 importance = global_importance(shap_values, list(X_shap.columns), top_n=15)
 print(importance.to_string(index=False))
 
-# Bar chart
+# Bar chart -- single color, magnitude only. Direction lives in the beeswarm.
 fig, ax = plt.subplots(figsize=(10, 7))
-colors = ["#F6735B" if v > 0 else "#5AD8A6"
-          for v in importance["mean_signed_shap"]]
 ax.barh(importance["feature"][::-1], importance["mean_abs_shap"][::-1],
-        color=colors[::-1], alpha=0.85, edgecolor="white")
+        color="#5B8FF9", alpha=0.85, edgecolor="white")
 ax.set_xlabel("mean |SHAP value|  (avg contribution to log-odds)")
-ax.set_title("Top 15 features by SHAP importance\n"
-             "(red bars push toward churn on average, green push away)",
+ax.set_title("Top 15 features by SHAP importance (magnitude)\n"
+             "for direction of effect, see the beeswarm in Section D",
              fontweight="bold")
 ax.grid(axis="x", linestyle="--", alpha=0.4)
 plt.tight_layout()
 plt.savefig(FIG_DIR / "05_shap_global_importance.png",
             dpi=140, bbox_inches="tight")
 print(f"\nSaved -> {FIG_DIR}/05_shap_global_importance.png")
+plt.show()
 
 
 # %% [markdown]
@@ -174,8 +216,8 @@ plt.title("SHAP summary -- direction and magnitude of top features",
           fontweight="bold", pad=20)
 plt.tight_layout()
 plt.savefig(FIG_DIR / "05_shap_beeswarm.png", dpi=140, bbox_inches="tight")
-plt.close()
 print(f"Saved -> {FIG_DIR}/05_shap_beeswarm.png")
+plt.show()
 
 
 # %% [markdown]
@@ -223,32 +265,57 @@ print("\n" + "=" * 70)
 print("F. LOCAL EXPLANATIONS -- three worked examples")
 print("=" * 70)
 
-pred_proba = xgb.predict_proba(X_shap)[:, 1]
+pred_proba = hgb.predict_proba(X_shap)[:, 1]
+
+# "Marginal" = closest to the Phase 6 EV decision boundary, not an arbitrary
+# probability like 0.15. Per-user break-even P* for each lever is
+#     P*(churn) = cost / (uplift × LTV_user)
+# A user becomes targetable when their P(churn) exceeds the CHEAPEST lever's
+# P* (i.e., the min across levers -- first EV to cross zero). The marginal
+# example is whoever sits closest to that personal boundary.
+user_ltv = df.loc[X_shap.index, "plan_tier"].map(LTV_BY_TIER).values
+per_lever_boundaries = np.array([
+    params["cost"] / (params["uplift"] * user_ltv)
+    for params in INTERVENTION_MENU.values()
+])                                              # shape: (n_levers, n_users)
+per_user_min_boundary = per_lever_boundaries.min(axis=0)
+marginal_idx = int(np.argmin(np.abs(pred_proba - per_user_min_boundary)))
+
 # Pick three example indices at different risk levels
 # 1. Highest-risk user (model most confident of churn)
-# 2. Marginal case near decision boundary
+# 2. Marginal case at the user's personal EV break-even
 # 3. Confidently retained user (control example)
 example_indices = [
     ("HIGH RISK   ", int(np.argmax(pred_proba))),
-    ("MARGINAL    ", int(np.argmin(np.abs(pred_proba - 0.15)))),
+    ("MARGINAL    ", marginal_idx),
     ("LOW RISK    ", int(np.argmin(pred_proba))),
 ]
+print(f"Marginal user's EV break-even (cheapest lever): "
+      f"P*={per_user_min_boundary[marginal_idx]:.3f}  |  "
+      f"actual P(churn)={pred_proba[marginal_idx]:.3f}")
 
+FEAT_W, VAL_W, SHAP_W = 32, 8, 7   # column widths for the compact table
 for label, idx in example_indices:
     p = pred_proba[idx]
     actual = int(y_shap.iloc[idx])
-    print(f"\n[{label}]  P(churn)={p:.3f}  actual={actual}")
+    print(f"\n[{label.strip()}]  P(churn)={p:.3f}  actual={actual}")
     local = local_explanation(shap_values, X_shap, list(X_shap.columns),
-                              idx=idx, top_n=6)
-    print(local.to_string(index=False))
+                              idx=idx, top_n=5)
+    # Compact fixed-width table -- avoids pandas' auto-truncation in Jupyter
+    print(f"  {'feature':<{FEAT_W}} {'value':>{VAL_W}} {'shap':>{SHAP_W}}  dir")
+    print(f"  {'-' * FEAT_W} {'-' * VAL_W} {'-' * SHAP_W}  ----")
+    for _, r in local.iterrows():
+        feat = str(r["feature"])[:FEAT_W]
+        print(f"  {feat:<{FEAT_W}} "
+              f"{float(r['feature_value']):>{VAL_W}.2f} "
+              f"{r['shap_value']:>+{SHAP_W}.3f}  {r['direction']}")
 
-    # Attach the intervention recommendation for the top RISK+ feature
     top_risk = local[local["direction"] == "RISK+"].head(1)
     if not top_risk.empty:
         feat = top_risk["feature"].iloc[0]
         lever = map_to_intervention(feat)
-        print(f"  Top intervention lever: {lever['lever']}  (cost=${lever['cost']:.0f})")
-        print(f"  Reason: {lever['note']}")
+        print(f"  -> Lever: {lever['lever']} "
+              f"(cost=${lever['cost']:.0f}) -- {lever['note']}")
 
 
 # %% [markdown]
@@ -296,7 +363,7 @@ print(
     f" have an actionable intervention lever."
 )
 print("\nHandoff to Phase 6 (cost-aware decision rule):")
-print("  - Per-user P(churn) from the calibrated XGBoost")
+print("  - Per-user P(churn) from the calibrated HistGBM")
 print("  - Per-user top SHAP driver from this notebook")
 print("  - Intervention cost + expected uplift from the lever mapping above")
 print("  - LTV by plan tier from the scenario brief")

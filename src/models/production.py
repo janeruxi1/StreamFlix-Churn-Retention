@@ -88,17 +88,26 @@ def _load_pickle_with_helpful_errors(path: Path, artifact_key: str,
     try:
         with open(path, "rb") as f:
             artifact = pickle.load(f)
-    except ModuleNotFoundError as e:
-        # Common case: pickle was created with sklearn >= 1.6 (which has
-        # sklearn.frozen.FrozenEstimator) and is being loaded on sklearn
-        # < 1.6. Regenerating on the current environment picks the
-        # right calibration path via the try/except in calibrate_xgboost.
-        raise ModuleNotFoundError(
+    except (ModuleNotFoundError, AttributeError, ImportError) as e:
+        # Sklearn version mismatch between pickle-time and load-time.
+        # Common triggers:
+        #   * ModuleNotFoundError: pickle from sklearn >= 1.6 (FrozenEstimator)
+        #     loaded on sklearn < 1.6 (or vice versa)
+        #   * AttributeError: sklearn's compiled Cython symbols
+        #     (e.g. _pyx_unpickle_CyHalfBinomialLoss) don't exist in the
+        #     currently-installed sklearn build (common after Python/sklearn
+        #     upgrade, or when pickle was made on a different Python version)
+        #   * ImportError: any other cross-version pickle rehydration failure
+        # Regenerating on the current environment always fixes it -- the
+        # notebook's try/except in calibrate_model picks the right calibration
+        # path for whichever sklearn is installed.
+        raise type(e)(
             f"Failed to unpickle {path.name}: {e}\n\n"
-            f"This usually means the pickle was created with a newer\n"
-            f"scikit-learn (>= 1.6) than the one you're loading with.\n"
+            f"This is a scikit-learn version mismatch between the machine\n"
+            f"that created the pickle and this one (Python or sklearn was\n"
+            f"upgraded, or the pickle came from a different environment).\n"
             f"Regenerate on THIS machine so the pickle matches your\n"
-            f"local sklearn version:\n"
+            f"local sklearn build:\n"
             f"    {regen_command}"
         ) from e
     return artifact[artifact_key], artifact

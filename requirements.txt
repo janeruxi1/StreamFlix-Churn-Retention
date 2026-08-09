@@ -4,6 +4,8 @@ numpy>=1.24
 scipy>=1.11
 
 # ML
+# scikit-learn: production model (HistGradientBoosting) + LR + RF + calibration
+# xgboost: kept for Phase 4b bake-off (comparison against HistGBM); NOT production
 scikit-learn>=1.3
 xgboost>=2.0
 shap>=0.44

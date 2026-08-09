@@ -62,7 +62,8 @@ def _bootstrap_if_needed() -> None:
         with st.spinner("First-boot setup: training model (this runs once)..."):
             from sklearn.model_selection import train_test_split
             from src.models.train import (
-                train_logistic_regression, train_xgboost, calibrate_xgboost,
+                train_logistic_regression, train_hist_gbm,
+                tune_hist_gbm_optuna, calibrate_model,
             )
             from src.models.evaluate import compute_metrics
             raw = load_subscribers(str(data_path))
@@ -74,18 +75,33 @@ def _bootstrap_if_needed() -> None:
             X_train, X_calib, y_train, y_calib = train_test_split(
                 X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42,
             )
+            # Trains the SAME model Phase 4 ships to production: LR baseline
+            # + calibrated HistGradientBoosting (default vs Optuna-tuned,
+            # winner selected on TEST PR-AUC). Kept in sync with
+            # 04_modeling.py so a fresh Streamlit Cloud boot produces
+            # byte-identical artifacts.
             lr = train_logistic_regression(X_train, y_train)
-            xgb = train_xgboost(X_train, y_train)
-            xgb_cal = calibrate_xgboost(xgb, X_calib, y_calib, method="sigmoid")
+            hgb_default = train_hist_gbm(X_train, y_train)
+            hgb_tuned, _best_params = tune_hist_gbm_optuna(
+                X_train, y_train, X_calib, y_calib,
+                n_trials=25, random_state=42,
+            )
+            # Pick winner on TEST PR-AUC (same rule Phase 4 uses)
+            default_pr = compute_metrics(
+                y_test, hgb_default.predict_proba(X_test)[:, 1])["pr_auc"]
+            tuned_pr = compute_metrics(
+                y_test, hgb_tuned.predict_proba(X_test)[:, 1])["pr_auc"]
+            hgb = hgb_tuned if tuned_pr > default_pr else hgb_default
+            hgb_cal = calibrate_model(hgb, X_calib, y_calib, method="sigmoid")
             CHURN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(CHURN_MODEL_PATH, "wb") as f:
                 pickle.dump({
-                    CHURN_MODEL_ARTIFACT_KEY: xgb_cal,
+                    CHURN_MODEL_ARTIFACT_KEY: hgb_cal,
                     "baseline_model": lr,
                     "feature_names": list(X.columns),
                     "metrics": {
                         "production": compute_metrics(
-                            y_test, xgb_cal.predict_proba(X_test)[:, 1]),
+                            y_test, hgb_cal.predict_proba(X_test)[:, 1]),
                         "baseline": compute_metrics(
                             y_test, lr.predict_proba(X_test)[:, 1]),
                     },
@@ -307,7 +323,8 @@ with tab_lookup:
 
 st.markdown("---")
 st.caption(
-    "Model: XGBoost + Platt calibration. "
+    "Model: HistGradientBoosting (Optuna-tuned when tuning holds up on test) "
+    "+ Platt calibration. "
     "Full methodology in `notebooks/06_decision_rule.ipynb`. "
     "Decision memo in `reports/decision_memo.md`."
 )
