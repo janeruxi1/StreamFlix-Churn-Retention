@@ -9,22 +9,25 @@
 # ---
 
 # %% [markdown]
-# # Phase 4b — Family Bake-off: audit behind Phase 4's XGBoost choice
+# # Phase 4b — Family Bake-off: audit behind Phase 4's HistGBM choice
 #
 # **Chronologically, this notebook runs BEFORE Phase 4** — it's the systematic audit
-# that either confirms or overturns the XGBoost family choice. Four families
-# (LR, XGBoost, HistGBM, Random Forest) plus a 25-trial Optuna-tuned XGBoost,
-# all tracked in MLflow, compared on PR-AUC and Brier.
+# that either confirms or overturns the tree-model family choice. Four families
+# (LR, XGBoost, HistGBM, Random Forest) plus three tuned variants (LR via
+# LogisticRegressionCV, XGBoost via Optuna, HistGBM via Optuna) — every candidate
+# gets tuned so nobody wins by getting more attention than the others. All tracked
+# in MLflow, compared on PR-AUC and Brier.
 #
-# **Verdict this bake-off produced:** among tree models, HistGBM narrowly beats XGBoost
-# (0.006 PR-AUC gap). Tuning adds only 0.001-0.005 per family — family choice dominates
-# tuning effort by 5-10×. Full ranking: `lr_tuned > lr_baseline > hist_gbm_tuned >
-# hist_gbm_default > xgboost_tuned > xgboost_default > random_forest`.
+# **Verdict this bake-off produced:** among tree models, HistGBM beats XGBoost on
+# PR-AUC (both default and Optuna-tuned). Tuning within any single family adds only
+# a small PR-AUC gain — family choice dominates tuning effort. See the printed
+# ranking table in Section E for the exact numbers from this run.
 #
-# Production choice: **calibrated HistGBM** (Phase 4). LR wins on raw PR-AUC but
-# doesn't offer tree-model production properties (SHAP per-user explanations, native
-# missing-value handling, noise tolerance). HistGBM chosen over XGBoost because it
-# wins the tree-model bake-off and drops the external xgboost dependency.
+# Production choice: **calibrated HistGBM** (Phase 4). LR is competitive on raw
+# PR-AUC but doesn't offer tree-model production properties (SHAP per-user
+# explanations, native missing-value handling, noise tolerance). HistGBM chosen
+# over XGBoost because it wins the tree-model bake-off and drops the external
+# xgboost dependency.
 #
 # This notebook does **NOT** persist a model. Phase 4 does that with the calibrated
 # winner (`models/churn_model_v1.pkl`).
@@ -35,7 +38,7 @@
 # |---|---|
 # | **A. Setup** | Same 60/20/20 splits as Phase 4 |
 # | **B. Bake-off** | LR, XGBoost, HistGBM, Random Forest (4 families) |
-# | **C. Hyperparameter tuning** | LR via LogisticRegressionCV + XGBoost via Optuna |
+# | **C. Hyperparameter tuning** | LR (LogisticRegressionCV) + XGBoost (Optuna) + HistGBM (Optuna) |
 # | **D. Comparison** | Cross-model table + bar chart |
 # | **E. Verdict** | Production choice reasoning |
 #
@@ -328,49 +331,40 @@ print(f"\nSaved -> {FIG_DIR}/04b_model_comparison.png")
 # %% [markdown]
 # ## E. Production choice + verdict
 #
-# Full ranking on this dataset (from the comparison table above):
-#
-# 1. **lr_tuned** (~0.178) — CV-selected C ≈ 0.038, +0.001 vs default LR
-# 2. **lr_baseline** (~0.177) — sklearn default C=1.0
-# 3. **hist_gbm_tuned** (~0.173-0.175) — Optuna-tuned, small gain over default
-# 4. **hist_gbm** (~0.173) — sklearn defaults
-# 5. **xgboost_tuned** (~0.168) — Optuna-tuned, small gain over default
-# 6. **xgboost_default** (~0.166) — XGBoost defaults
-# 7. **random_forest** (~0.161) — bagged trees, worst on this data
+# See the printed ranking table and tree-model sub-ranking below for the exact
+# PR-AUC / Brier numbers this run produced (Optuna is stochastic — numbers shift
+# slightly between runs, but the ordering is stable).
 #
 # **Two headline findings:**
 #
-# 1. **Family choice dominates tuning by 5-10×.** Families spread 0.017 PR-AUC apart
-#    (RF 0.161 → tuned LR 0.178). Tuning within any family adds only 0.001-0.005 PR-AUC.
-#    Bake-off is a much better investment than deeper Optuna trials on a single family.
-# 2. **HistGBM beats XGBoost among tree models** by 0.006 PR-AUC, holding both defaults
+# 1. **Family choice dominates tuning.** The spread across model families is
+#    roughly an order of magnitude larger than the spread from tuning within any
+#    single family. A well-chosen family with defaults beats a poorly-chosen
+#    family with heavy tuning — bake-off is a better investment than deeper
+#    Optuna trials on a single model.
+# 2. **HistGBM beats XGBoost among tree models** on PR-AUC, holding both defaults
 #    AND tuned. Same tree-model production properties, no external dependency.
 #
 # **Production choice: calibrated HistGBM.** Made in Phase 4, validated here.
 #
-# **Why not tuned LR** (raw metric winner)? LR wins by 0.005 PR-AUC over HistGBM but
-# lacks tree-model production properties:
+# **Why not LR** (competitive on raw metric)? LR is close on PR-AUC but lacks
+# tree-model production properties:
 # — SHAP TreeExplainer gives per-user local explanations that Phase 5 depends on;
 #   LR SHAP is essentially just standardized coefficients × feature values
 # — Native missing-value handling; LR needs an imputation pipeline
 # — Noise tolerance on real production data (our DGP is unusually LR-friendly)
 #
-# 0.005 PR-AUC on synthetic clean data doesn't outweigh those three real production
-# concerns. LR stays as the documented baseline in `models/churn_model_v1.pkl`.
+# A small PR-AUC edge on synthetic clean data doesn't outweigh those three real
+# production concerns. LR stays as the documented baseline in
+# `models/churn_model_v1.pkl`.
 #
 # **Why HistGBM over XGBoost** (both trees, similar properties)?
-# — HistGBM wins the tree-model bake-off (+0.006 PR-AUC, both default and tuned)
+# — HistGBM wins the tree-model bake-off (both default and tuned)
 # — Identical SHAP + missing-value handling
 # — Sklearn-only, drops the external xgboost dependency
 # — Trade-off accepted: XGBoost's portable JSON model format goes away
 #   (calibrated wrapper is pickle-only anyway, so XGBoost's format advantage
 #   was only available for raw boosters, not for what we ship)
-#
-# **Interview-ready framing:** *"I tuned every candidate — LR via LogisticRegressionCV,
-# XGBoost via Optuna, HistGBM via Optuna. Nobody got a free pass. Family choice
-# contributes 5-10× more than tuning at this dataset size. HistGBM wins the tree-model
-# comparison; LR wins the aggregate metric but not the full criteria set. Chose HistGBM
-# with an explicit trade-off documented, not hidden."*
 
 # %%
 print("\n" + "=" * 70)
@@ -382,11 +376,23 @@ winner_metrics = comparison.iloc[0].to_dict()
 print(f"\nRaw PR-AUC winner: {winner_name}  "
       f"(PR-AUC={winner_metrics['pr_auc']:.4f}, Brier={winner_metrics['brier']:.4f})")
 
-# Family-choice vs tuning-effort insight (compute if we have the data)
+# Family-choice vs tuning-effort insight -- computed from actual results
 family_spread = comparison["pr_auc"].max() - comparison["pr_auc"].min()
+
+# Estimate within-family tuning spread from any pair we have
+tuning_deltas = []
+for base, tuned in [("lr_baseline", "lr_tuned"),
+                    ("xgboost_default", "xgboost_tuned"),
+                    ("hist_gbm", "hist_gbm_tuned")]:
+    if base in comparison.index and tuned in comparison.index:
+        tuning_deltas.append(abs(comparison.loc[tuned, "pr_auc"]
+                                 - comparison.loc[base, "pr_auc"]))
+mean_tuning_delta = sum(tuning_deltas) / len(tuning_deltas) if tuning_deltas else 0.003
+
 print(f"\nFamily-choice spread across all models: {family_spread:.4f} PR-AUC")
-print("Tuning-effort spread within any single family: ~0.001-0.005 PR-AUC")
-print(f"Family choice dominates tuning by ~{family_spread / 0.003:.0f}x at this dataset size.\n")
+print(f"Mean tuning-effort delta within a family:  {mean_tuning_delta:.4f} PR-AUC")
+if mean_tuning_delta > 0:
+    print(f"Family choice dominates tuning by ~{family_spread / mean_tuning_delta:.1f}x on this run.\n")
 
 # Explicit tree-model sub-ranking (so the HistGBM > XGBoost story is unambiguous)
 tree_models = [n for n in comparison.index
@@ -402,20 +408,21 @@ print("""
 PRODUCTION CHOICE: calibrated HistGradientBoosting (Phase 4 output).
 
 Reasoning:
-  1. HistGBM wins the tree-model bake-off vs XGBoost by ~0.006 PR-AUC
-     (both default AND Optuna-tuned). Same tree-model production
-     properties -- SHAP TreeExplainer support, native missing-value
-     handling, noise tolerance -- and drops the external xgboost
-     dependency (sklearn-only).
+  1. HistGBM wins the tree-model bake-off vs XGBoost on PR-AUC
+     (both default AND Optuna-tuned -- see tree-model sub-ranking above).
+     Same tree-model production properties -- SHAP TreeExplainer support,
+     native missing-value handling, noise tolerance -- and drops the
+     external xgboost dependency (sklearn-only).
 
-  2. Tuned LR wins the raw metric (~0.178 vs HistGBM's ~0.173) but lacks
-     tree-model production properties. Chose HistGBM on FULL criteria,
-     not raw metric alone. Trade-off documented, not hidden.
+  2. LR is competitive on raw PR-AUC but lacks tree-model production
+     properties. Chose HistGBM on FULL criteria, not raw metric alone.
+     Trade-off documented, not hidden.
 
-  3. Family choice dominates tuning by ~5-10x at this dataset size.
-     Bake-off (which family?) is a better investment than deeper Optuna
-     trials on a single family. This bake-off tuned every candidate so
-     the family comparison is fair -- nobody won by getting more tuning
+  3. Family choice dominates tuning at this dataset size (see the
+     family_spread vs mean tuning delta printed above). Bake-off
+     (which family?) is a better investment than deeper Optuna trials
+     on a single family. This bake-off tuned every candidate so the
+     family comparison is fair -- nobody won by getting more tuning
      attention than the others.
 
 LR is persisted as the documented baseline in `models/churn_model_v1.pkl`

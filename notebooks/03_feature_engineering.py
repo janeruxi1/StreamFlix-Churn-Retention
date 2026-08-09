@@ -269,4 +269,4 @@ modeling -- that would drop features that only matter in combinations.
 SHAP in Phase 5 ranks them properly.
 """)
 
-print("Ready for Phase 4 (modeling -- LR baseline + XGBoost + calibration).")
+print("Ready for Phase 4 (modeling -- LR baseline + HistGBM + calibration).")

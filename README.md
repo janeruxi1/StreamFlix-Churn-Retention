@@ -84,7 +84,7 @@ The two files share the same 50,000 rows; the experiment file adds five columns 
 │   ├── 01_data_audit.py / .ipynb        # Schema + distributions + signal screen
 │   ├── 02_eda.py / .ipynb               # Segment rates + KM + landmark analysis
 │   ├── 03_feature_engineering.py / .ipynb  # Reusable feature transforms
-│   ├── 04_modeling.py / .ipynb          # LR baseline → XGBoost + calibration (v1 model)
+│   ├── 04_modeling.py / .ipynb          # LR baseline → HistGBM + calibration (v1 model)
 │   ├── 04b_model_comparison.py / .ipynb # 4-family bake-off + Optuna tuning (audit)
 │   ├── 05_shap_levers.py / .ipynb       # SHAP → actionable retention levers
 │   ├── 06_decision_rule.py / .ipynb     # Cost-aware policy + ROI sweep (v1 policy)
@@ -155,7 +155,7 @@ Sidebar controls let anyone poke at the budget, per-lever cost, uplift assumptio
 
 ## 📈 Experiment tracking (MLflow)
 
-Every model run — across `notebooks/04_modeling.py` (production pipeline), `notebooks/04b_model_comparison.py` (bake-off + tuning), and `notebooks/08_uplift_modeling.py` (causal uplift bake-off) — is wrapped in an MLflow context (`src/models/tracking.py`) that logs parameters, metrics, and the fitted model. Ten runs land in the local SQLite store (`mlflow.db`): `lr_baseline`, `xgboost_uncalibrated`, `xgboost_calibrated`, `hist_gbm`, `random_forest`, `xgboost_tuned`, plus the four Phase 8 uplift runs `uplift_s_learner`, `uplift_t_learner`, `uplift_x_learner`, `uplift_class_transform`. Launch the tracking UI with `mlflow ui` from the project root; runs appear under the `streamflix_churn` experiment.
+Every model run — across `notebooks/04_modeling.py` (production pipeline), `notebooks/04b_model_comparison.py` (bake-off + tuning), and `notebooks/08_uplift_modeling.py` (causal uplift bake-off) — is wrapped in an MLflow context (`src/models/tracking.py`) that logs parameters, metrics, and the fitted model. Twelve runs land in the local SQLite store (`mlflow.db`): from Phase 4 — `lr_baseline`, `hist_gbm_default`, `hist_gbm_tuned`, and the calibrated winner `hist_gbm_{winner}_calibrated` (default or tuned, whichever wins on TEST PR-AUC); from Phase 4b's bake-off — `xgboost_default`, `hist_gbm`, `random_forest`, `lr_tuned`, `xgboost_tuned`, `hist_gbm_tuned`; and from Phase 8 — `uplift_s_learner`, `uplift_t_learner`, `uplift_x_learner`, `uplift_class_transform`. Launch the tracking UI with `mlflow ui` from the project root; runs appear under the `streamflix_churn` experiment.
 
 ```bash
 python notebooks/04_modeling.py        # runs land in mlruns/
@@ -166,7 +166,7 @@ mlflow ui                              # localhost:5000 — compare runs
 
 | Registered name | Promoted by | Purpose |
 |---|---|---|
-| `streamflix_churn_production` | Phase 4 (calibrated XGBoost) | Per-user P(churn) for the decision rule |
+| `streamflix_churn_production` | Phase 4 (calibrated HistGradientBoosting) | Per-user P(churn) for the decision rule |
 | `streamflix_uplift_credit_5` | Phase 8 (winning uplift learner) | Per-user retention lift for the uplift-aware policy |
 
 Every re-run creates a new numbered version; the `@production` alias moves to point at the latest one. Downstream jobs load the current winner without hardcoding a run ID:
@@ -211,7 +211,7 @@ The project is built in 13 phases that mirror an end-to-end retention modeling w
 2. ✅ **Phase 1:** Synthetic dataset generator + data audit
 3. ✅ **Phase 2:** EDA + survival analysis (KM, landmark analysis, sensitivity)
 4. ✅ **Phase 3:** Feature engineering
-5. ✅ **Phase 4:** Modeling — LR baseline → XGBoost + calibration
+5. ✅ **Phase 4:** Modeling — LR baseline → HistGradientBoosting + calibration
 6. ✅ **Phase 4b:** Model comparison — 4-family bake-off + Optuna tuning + MLflow tracking
 7. ✅ **Phase 5:** SHAP — actionable retention levers
 8. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep *(v1 policy — propensity-based)*

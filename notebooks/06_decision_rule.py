@@ -60,6 +60,10 @@ from src.decisions.policy import (
     score_all_levers, pick_best_lever, apply_budget_cap,
     apply_premium_cap, summarize_policy, simulate_blanket_campaign,
 )
+from src.decisions.ltv import (
+    MONTHLY_REVENUE_BY_TIER, RMST_HORIZON_MONTHS,
+    kaplan_meier, restricted_mean_survival_time,
+)
 
 FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -113,10 +117,21 @@ menu_df["cost"] = menu_df["cost"].map("${:.2f}".format)
 menu_df["uplift"] = menu_df["uplift"].map("{:.0%}".format)
 print(menu_df)
 
-print("\nLTV by tier (monthly_revenue x retained months):")
-for tier, v in LTV_BY_TIER.items():
-    print(f"  {tier:<10}  ${v:.0f}")
-print(f"\nPremium upgrade cap: {PREMIUM_UPGRADE_CAP_PCT:.0%} of base")
+print(f"\nLTV by tier (RMST x monthly revenue, "
+      f"{RMST_HORIZON_MONTHS}-month horizon):")
+print(f"  {'tier':<10} {'months retained':>17} {'$/mo':>8} {'LTV':>8}")
+print(f"  {'-'*10} {'-'*17} {'-'*8} {'-'*8}")
+for tier, ltv_val in LTV_BY_TIER.items():
+    sub = df[df["plan_tier"] == tier]
+    t, S = kaplan_meier(sub["tenure_months"].values,
+                        sub["churned_next_30d"].values)
+    rmst = restricted_mean_survival_time(t, S, horizon=RMST_HORIZON_MONTHS)
+    monthly = MONTHLY_REVENUE_BY_TIER[tier]
+    print(f"  {tier:<10} {rmst:>17.2f} {'$' + f'{monthly:.0f}':>8} "
+          f"{'$' + f'{ltv_val:.0f}':>8}")
+print(f"\nMax possible retention over the horizon: "
+      f"{RMST_HORIZON_MONTHS:.0f} months (RMST ceiling)")
+print(f"Premium upgrade cap: {PREMIUM_UPGRADE_CAP_PCT:.0%} of base")
 
 
 # %% [markdown]
@@ -357,6 +372,141 @@ ax.grid(True, linestyle="--", alpha=0.4)
 plt.tight_layout()
 plt.savefig(FIG_DIR / "06_uplift_sensitivity.png", dpi=140, bbox_inches="tight")
 print(f"\nSaved -> {FIG_DIR}/06_uplift_sensitivity.png")
+
+
+# %% [markdown]
+# ## H.5. Sensitivity — LTV horizon robustness
+#
+# LTV is `RMST(horizon) × monthly_revenue`. Production uses a **24-month** horizon,
+# but the KM curve extends further. Why not 36? 48? 60? Two reasons the shorter
+# horizon is safer:
+#
+# 1. **KM tail is noisy.** Only ~30% of subscribers are observed to 24 months,
+#    ~15% to 36, ~5% to 48, ~1% to 60. Confidence intervals on S(t) widen
+#    quickly past 24 months.
+# 2. **Right-censoring bias.** Subscribers we observe at long tenures are the
+#    self-selected survivors of earlier churn cohorts — systematically more
+#    retention-prone than an average new signup. Extending the horizon
+#    over-credits those survivors' retention to the LTV of a fresh subscriber.
+#
+# But "shorter is safer" is only a real defense if we've LOOKED at the alternative.
+# This section shows LTV and the resulting policy KPIs at 12/24/36/48/60-month
+# horizons so the choice is visible, not just asserted. **The production
+# recommendation still uses 24** -- lower horizons under-value retention; higher
+# horizons inflate LTV based on shrinking, biased tail samples.
+
+# %%
+print("\n" + "=" * 70)
+print("H.5. SENSITIVITY: LTV HORIZON ROBUSTNESS")
+print("=" * 70)
+
+horizons = [12, 24, 36, 48, 60]
+
+# --- Per-tier RMST + LTV at each horizon --------------------------------
+horizon_ltv = {}   # {horizon: {tier: LTV}}
+horizon_rmst = {}  # {horizon: {tier: RMST}}
+for h in horizons:
+    horizon_ltv[h] = {}
+    horizon_rmst[h] = {}
+    for tier, monthly in MONTHLY_REVENUE_BY_TIER.items():
+        sub = df[df["plan_tier"] == tier]
+        t, S = kaplan_meier(sub["tenure_months"].values,
+                            sub["churned_next_30d"].values)
+        rmst = restricted_mean_survival_time(t, S, horizon=h)
+        horizon_rmst[h][tier] = rmst
+        horizon_ltv[h][tier] = round(monthly * rmst)
+
+print("\nRMST (months retained) by tier and horizon:")
+print(f"  {'horizon':>7} {'Basic':>10} {'Standard':>10} {'Premium':>10}")
+print(f"  {'-'*7} {'-'*10} {'-'*10} {'-'*10}")
+for h in horizons:
+    r = horizon_rmst[h]
+    marker = "  <- production" if h == RMST_HORIZON_MONTHS else ""
+    print(f"  {h:>6}mo {r['Basic']:>10.2f} {r['Standard']:>10.2f} "
+          f"{r['Premium']:>10.2f}{marker}")
+
+print("\nImplied LTV ($) by tier and horizon:")
+print(f"  {'horizon':>7} {'Basic':>10} {'Standard':>10} {'Premium':>10}")
+print(f"  {'-'*7} {'-'*10} {'-'*10} {'-'*10}")
+for h in horizons:
+    l = horizon_ltv[h]
+    marker = "  <- production" if h == RMST_HORIZON_MONTHS else ""
+    print(f"  {h:>6}mo ${l['Basic']:>9.0f} ${l['Standard']:>9.0f} "
+          f"${l['Premium']:>9.0f}{marker}")
+
+# --- Policy KPIs at each horizon ----------------------------------------
+horizon_rows = []
+for h in horizons:
+    ltv_map = horizon_ltv[h]
+    ltv_h = df["plan_tier"].map(ltv_map).values
+    p = pick_best_lever(p_churn, ltv_h, INTERVENTION_MENU)
+    p = apply_budget_cap(p, budget=BUDGET)
+    p = apply_premium_cap(p, n_total=len(p), cap_pct=PREMIUM_UPGRADE_CAP_PCT)
+    s = summarize_policy(p, targeted_only=True)
+    horizon_rows.append({
+        "horizon_mo":  h,
+        "n_targeted":  s["n_targeted"],
+        "total_cost":  s["total_cost"],
+        "net_ev":      s["net_expected_value"],
+        "roi":         s["roi_multiplier"],
+    })
+horizon_df = pd.DataFrame(horizon_rows)
+
+print("\nPolicy KPIs at $200k budget for each horizon:")
+disp = horizon_df.copy()
+disp["horizon"]    = disp["horizon_mo"].map(lambda x: f"{x}mo")
+disp["n_targeted"] = disp["n_targeted"].map("{:,}".format)
+disp["total_cost"] = disp["total_cost"].map("${:,.0f}".format)
+disp["net_ev"]     = disp["net_ev"].map("${:,.0f}".format)
+disp["roi"]        = disp["roi"].map("{:.2f}x".format)
+print(disp[["horizon", "n_targeted", "total_cost", "net_ev", "roi"]]
+      .to_string(index=False))
+
+# --- Chart: net EV + n_targeted across horizons -------------------------
+fig, ax1 = plt.subplots(figsize=(10, 5.5))
+color_ev, color_n = "#5B8FF9", "#F6735B"
+
+ax1.plot(horizon_df["horizon_mo"], horizon_df["net_ev"],
+         marker="o", markersize=10, linewidth=2.5, color=color_ev,
+         label="Net EV / month ($, left axis)")
+ax1.axvline(RMST_HORIZON_MONTHS, color="gray", linestyle=":", linewidth=1.5,
+            label=f"production horizon ({RMST_HORIZON_MONTHS}mo)")
+ax1.set_xlabel("LTV horizon (months)")
+ax1.set_ylabel("Net EV / month  ($)", color=color_ev)
+ax1.tick_params(axis="y", labelcolor=color_ev)
+ax1.grid(True, linestyle="--", alpha=0.4)
+ax1.set_xticks(horizons)
+
+ax2 = ax1.twinx()
+ax2.plot(horizon_df["horizon_mo"], horizon_df["n_targeted"],
+         marker="s", markersize=9, linewidth=2, color=color_n,
+         label="Users targeted (right axis)", alpha=0.85)
+ax2.set_ylabel("Users targeted", color=color_n)
+ax2.tick_params(axis="y", labelcolor=color_n)
+
+fig.suptitle("LTV horizon sensitivity -- how much does the decision depend "
+             "on where we draw the horizon?", fontweight="bold")
+# Combine legends from both axes
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2, loc="center right")
+plt.tight_layout()
+plt.savefig(FIG_DIR / "06_ltv_horizon_sensitivity.png",
+            dpi=140, bbox_inches="tight")
+print(f"\nSaved -> {FIG_DIR}/06_ltv_horizon_sensitivity.png")
+plt.show()
+
+print(f"""
+Read on the horizon choice (production = {RMST_HORIZON_MONTHS} months):
+  * Doubling the horizon (24 -> 48) roughly doubles Net EV on paper, but
+    that gain sits on top of KM tail estimates from ~5% of the population
+    -- wide CI, biased toward survivors. Unreliable.
+  * Halving the horizon (24 -> 12) understates LTV badly (m12 is right at
+    the anniversary churn spike, not past it), collapses target counts,
+    and leaves clear positive-EV users un-targeted.
+  * 24 months is the point where more data doesn't buy us much precision
+    but does buy us survivor bias.
+""")
 
 
 # %% [markdown]

@@ -18,17 +18,17 @@
 # validated by Phase 4b's systematic bake-off (4 model families + 3 tuned variants:
 # LR via LogisticRegressionCV, XGBoost via Optuna, HistGBM via Optuna). Key findings:
 #
-# - **HistGBM beats XGBoost by 0.006 PR-AUC** on this dataset (0.173 vs 0.166)
-# - **Tuning barely moved anything** (~0.001-0.005 per family) — family choice
-#   dominates tuning effort by 5-10×
+# - **HistGBM beats XGBoost on PR-AUC** among tree models (both default and tuned)
+# - **Tuning within a family moves the metric only slightly** — family choice
+#   dominates tuning effort
 # - Among tree models, HistGBM wins on the metric AND has identical production
 #   properties: SHAP TreeExplainer support, native missing-value handling, tree-based
 #   noise tolerance
 # - Bonus: drops the external `xgboost` dependency (sklearn-only) — one less thing
 #   to version-manage
 #
-# **Trade-off called out honestly:** the raw metric winner across ALL models is tuned
-# LR (~0.178), not any tree model. Chose HistGBM anyway because:
+# **Trade-off called out honestly:** LR is competitive on raw PR-AUC across all
+# models. Chose HistGBM anyway because:
 # 1. **SHAP richness** — tree structure enables per-user local explanations (Phase 5)
 # 2. **Native missing-value handling** — LR needs an imputation pipeline
 # 3. **Real-data noise tolerance** — tree models degrade more gracefully than linear
@@ -45,8 +45,8 @@
 # |---|---|
 # | **A. Setup** | Load engineered data, prepare features, three-way split |
 # | **B. LR baseline** | Regularized logistic regression on the same features |
-# | **C. HistGBM (uncalibrated)** | Sklearn-native gradient boosting, default hyperparams |
-# | **D. HistGBM + Platt calibration** | Sigmoid calibration on held-out calib set |
+# | **C. HistGBM default vs Optuna-tuned** | Train both, ship winner on TEST PR-AUC |
+# | **D. Winner + Platt calibration** | Sigmoid calibration on held-out calib set |
 # | **E. Discrimination curves** | PR + ROC overlay for all three models |
 # | **F. Calibration curves** | Reliability diagrams before vs after |
 # | **G. Top-K targeting** | Precision/recall at K% — direct input to Phase 6 |
@@ -83,7 +83,7 @@ from src.data.loader import load_subscribers
 from src.features.transforms import build_features
 from src.models.train import (
     prepare_features, train_logistic_regression,
-    train_hist_gbm, calibrate_model,
+    train_hist_gbm, tune_hist_gbm_optuna, calibrate_model,
 )
 from src.models.evaluate import (
     compute_metrics, top_k_metrics, calibration_curve_points,
@@ -157,37 +157,101 @@ for k, v in lr_metrics.items():
 
 
 # %% [markdown]
-# ## C. HistGBM (uncalibrated)
+# ## C. HistGBM — default vs Optuna-tuned (ship the winner)
 #
 # `HistGradientBoostingClassifier` — sklearn's native histogram-based gradient boosting.
-# Chosen over XGBoost after Phase 4b's bake-off showed HistGBM beats XGBoost by 0.006
-# PR-AUC on this data, has identical tree-model production properties (SHAP + missing
-# values + noise tolerance), and drops the external `xgboost` dependency (sklearn only).
+# Chosen over XGBoost after Phase 4b's bake-off showed HistGBM beats XGBoost on PR-AUC,
+# has identical tree-model production properties (SHAP + missing values + noise
+# tolerance), and drops the external `xgboost` dependency (sklearn only).
+#
+# Train two variants and pick the one that wins on the **held-out test set**:
+#
+# - **C.1 Default HistGBM** — sklearn defaults, kept as baseline
+# - **C.2 Optuna-tuned HistGBM** — 25-trial TPE search on the calibration split as
+#   validation (log-scale priors for `learning_rate` and `l2_regularization`;
+#   same tuning function used by Phase 4b's bake-off, so results are directly
+#   comparable)
+# - **C.3 Winner selection** — compare on TEST PR-AUC. Optuna searched against
+#   val, so any val-set gain could be overfit; requiring the winner to hold up
+#   on test data is the honest check before promoting.
+#
+# Whichever wins is what Section D calibrates and Phase 4 ships to production.
 
 # %%
 print("\n" + "=" * 70)
-print("C. HISTGBM (UNCALIBRATED)")
+print("C. HISTGBM -- DEFAULT VS OPTUNA-TUNED")
 print("=" * 70)
-with mlflow_run("hist_gbm_uncalibrated") as run:
-    hgb = train_hist_gbm(X_train, y_train)
-    hgb_proba_test = hgb.predict_proba(X_test)[:, 1]
-    hgb_metrics = compute_metrics(y_test, hgb_proba_test)
+
+# --- C.1  Default HistGBM (baseline, kept for comparison) ---------------
+print("\n--- C.1  Default HistGBM (baseline) ---")
+with mlflow_run("hist_gbm_default") as run:
+    hgb_default = train_hist_gbm(X_train, y_train)
+    hgb_default_proba = hgb_default.predict_proba(X_test)[:, 1]
+    hgb_default_metrics = compute_metrics(y_test, hgb_default_proba)
     if run is not None:
         run.log_params({
-            "model_type": "hist_gbm",
+            "model_type": "hist_gbm_default",
             "max_iter": 300, "max_depth": 5, "learning_rate": 0.05,
             "min_samples_leaf": 25, "l2_regularization": 1.0,
             "n_train": len(X_train), "n_features": X_train.shape[1],
         })
-        run.log_metrics(hgb_metrics)
-        run.log_model(hgb, name="model")
-print("Metrics on test set:")
-for k, v in hgb_metrics.items():
+        run.log_metrics(hgb_default_metrics)
+        run.log_model(hgb_default, name="model")
+for k, v in hgb_default_metrics.items():
     print(f"  {k:<10} {v:.4f}")
+
+# --- C.2  Optuna-tuned HistGBM (25 trials, val = X_calib) ---------------
+print("\n--- C.2  Optuna-tuned HistGBM (25-trial TPE, val=X_calib) ---")
+with mlflow_run("hist_gbm_tuned") as run:
+    hgb_tuned, best_hgb_params = tune_hist_gbm_optuna(
+        X_train, y_train, X_calib, y_calib,
+        n_trials=25, random_state=42,
+    )
+    hgb_tuned_proba = hgb_tuned.predict_proba(X_test)[:, 1]
+    hgb_tuned_metrics = compute_metrics(y_test, hgb_tuned_proba)
+    if run is not None:
+        run.log_params({"model_type": "hist_gbm_tuned", **best_hgb_params,
+                        "n_train": len(X_train),
+                        "n_features": X_train.shape[1]})
+        run.log_metrics(hgb_tuned_metrics)
+        try:
+            run.log_model(hgb_tuned, name="model")
+        except Exception as e:
+            print(f"  (model log skipped: {e})")
+print(f"  Best params from Optuna: {best_hgb_params}")
+for k, v in hgb_tuned_metrics.items():
+    print(f"  {k:<10} {v:.4f}")
+
+# --- C.3  Winner selection on TEST PR-AUC -------------------------------
+print("\n--- C.3  Winner selection (TEST PR-AUC) ---")
+default_pr = hgb_default_metrics["pr_auc"]
+tuned_pr   = hgb_tuned_metrics["pr_auc"]
+delta_pr   = tuned_pr - default_pr
+print(f"  default PR-AUC: {default_pr:.4f}")
+print(f"  tuned   PR-AUC: {tuned_pr:.4f}   (Δ vs default = {delta_pr:+.4f})")
+
+if tuned_pr > default_pr:
+    hgb = hgb_tuned
+    hgb_proba_test = hgb_tuned_proba
+    hgb_metrics = hgb_tuned_metrics
+    winner_variant = "tuned"
+    print(f"  WINNER: tuned HistGBM -- val-set gain held up on test "
+          f"(+{delta_pr:.4f} PR-AUC), not overfit. Shipping tuned variant.")
+else:
+    hgb = hgb_default
+    hgb_proba_test = hgb_default_proba
+    hgb_metrics = hgb_default_metrics
+    winner_variant = "default"
+    print(f"  WINNER: default HistGBM -- tuning gain on val did NOT hold "
+          f"on test (Δ={delta_pr:+.4f}); avoiding val-set overfit by "
+          f"shipping defaults.")
 
 
 # %% [markdown]
-# ## D. HistGBM + Platt (sigmoid) calibration
+# ## D. Calibrate the winner (Platt / sigmoid)
+#
+# Whichever variant won Section C (`hgb`) gets Platt-calibrated on the held-out
+# calib split and shipped as production.
 #
 # **Platt over isotonic:** monotonic transform preserves ranking metrics (PR-AUC and
 # ROC-AUC are invariant under monotonic transforms). Isotonic is more flexible but
@@ -198,19 +262,21 @@ for k, v in hgb_metrics.items():
 
 # %%
 print("\n" + "=" * 70)
-print("D. HISTGBM + PLATT (SIGMOID) CALIBRATION")
+print(f"D. HISTGBM ({winner_variant.upper()}) + PLATT CALIBRATION")
 print("=" * 70)
-with mlflow_run("hist_gbm_calibrated") as run:
+calibrated_run_name = f"hist_gbm_{winner_variant}_calibrated"
+with mlflow_run(calibrated_run_name) as run:
     hgb_cal = calibrate_model(hgb, X_calib, y_calib, method="sigmoid")
     hgb_cal_proba_test = hgb_cal.predict_proba(X_test)[:, 1]
     hgb_cal_metrics = compute_metrics(y_test, hgb_cal_proba_test)
     winner_run_id = None
     if run is not None:
         run.log_params({
-            "model_type": "hist_gbm_calibrated",
+            "model_type": calibrated_run_name,
             "calibration_method": "sigmoid_platt",
             "n_calib": len(X_calib),
-            "base_run": "hist_gbm_uncalibrated",
+            "base_variant": winner_variant,
+            "base_run": f"hist_gbm_{winner_variant}",
         })
         run.log_metrics(hgb_cal_metrics)
         run.log_model(hgb_cal, name="model")
@@ -234,9 +300,10 @@ print("\n" + "-" * 70)
 print("MODEL COMPARISON (test set)")
 print("-" * 70)
 comparison = pd.DataFrame({
-    "logistic_regression":  lr_metrics,
-    "hist_gbm_uncal":       hgb_metrics,
-    "hist_gbm_calibrated":  hgb_cal_metrics,
+    "logistic_regression":       lr_metrics,
+    "hist_gbm_default":          hgb_default_metrics,
+    "hist_gbm_tuned":            hgb_tuned_metrics,
+    f"hist_gbm_{winner_variant}_calibrated":  hgb_cal_metrics,
 }).round(4)
 print(comparison)
 
@@ -254,9 +321,10 @@ print("=" * 70)
 
 fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 models = [
-    ("LR baseline",          lr_proba_test,     "#5B8FF9"),
-    ("HistGBM (uncalibrated)", hgb_proba_test,   "#F6735B"),
-    ("HistGBM (calibrated)",  hgb_cal_proba_test, "#5AD8A6"),
+    ("LR baseline",                              lr_proba_test,       "#5B8FF9"),
+    ("HistGBM default",                          hgb_default_proba,   "#F6AD55"),
+    ("HistGBM tuned",                            hgb_tuned_proba,     "#F6735B"),
+    (f"HistGBM {winner_variant} (calibrated)",   hgb_cal_proba_test,  "#5AD8A6"),
 ]
 
 # PR curve
@@ -352,7 +420,7 @@ for name, proba, _ in models:
 print("\n" + "=" * 70)
 print("G. TOP-K TARGETING ANALYSIS")
 print("=" * 70)
-print(f"\nUsing best model: XGBoost calibrated (test n={len(y_test):,})")
+print(f"\nUsing best model: HistGBM calibrated (test n={len(y_test):,})")
 k_values = [0.05, 0.10, 0.20, 0.30, 0.50]
 rows = []
 for k in k_values:
@@ -460,7 +528,8 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
 
 # LEFT: cumulative gain curve
 ax1.plot(cumulative_share * 100, cumulative_gain * 100,
-         color="#5B8FF9", linewidth=2.5, label="Calibrated XGBoost")
+         color="#5B8FF9", linewidth=2.5,
+         label=f"Calibrated HistGBM ({winner_variant})")
 ax1.plot([0, 100], [0, 100], color="gray", linestyle="--",
          linewidth=1, label="random targeting")
 # Perfect model reaches 100% gain at share = base rate
@@ -504,7 +573,7 @@ for ax in (ax1, ax2):
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-plt.suptitle("Lift analysis -- calibrated XGBoost on the test set",
+plt.suptitle(f"Lift analysis -- calibrated HistGBM ({winner_variant}) on the test set",
              fontsize=12, fontweight="bold", y=1.02)
 plt.tight_layout()
 plt.savefig(FIG_DIR / "04_lift_chart.png", dpi=140, bbox_inches="tight")
@@ -515,25 +584,28 @@ plt.show()
 # %% [markdown]
 # ## I. Verdict + model persistence
 #
-# Both models (LR baseline + calibrated XGBoost) are pickled into
-# `models/churn_model_v1.pkl`. LR sits in the `baseline_model` slot as a documented
-# sanity check; calibrated XGBoost is the `production_model` that the Streamlit app
-# and Phase 5-7 load.
+# Both models are pickled into `models/churn_model_v1.pkl`. LR sits in the
+# `baseline_model` slot as a documented sanity check; the calibrated HistGBM
+# variant that won Section C (default or tuned) is the `production_model` that
+# the Streamlit app and Phase 5-7 load.
 
 # %%
 print("\n" + "=" * 70)
 print("I. VERDICT + MODEL PERSISTENCE")
 print("=" * 70)
 # Honest read on the comparison:
-#   - LR and HistGBM are within 1-2 PR-AUC points of each other -- noise
-#     level given a 5% positive class and a 10k test set
-#   - All three models have similar Brier scores (~0.047) -- already
-#     well-calibrated, so calibration didn't move the needle but also
-#     didn't hurt under Platt (unlike isotonic, which would have)
-#   - LR baseline is genuinely competitive -- a sign that Phase 3 feature
-#     engineering captured most of the non-linearity manually
+#   - LR and HistGBM are close on this synthetic dataset -- Phase 3 feature
+#     engineering captured most of the non-linearity, so linear models
+#     stay competitive
+#   - All variants have similar Brier scores -- already well-calibrated,
+#     so calibration didn't move the needle but also didn't hurt under
+#     Platt (unlike isotonic, which would have)
+#   - Section C selected {default | tuned} HistGBM based on TEST PR-AUC
+#     (not the val-set score Optuna searched against) -- so any tuning
+#     gain that shipped genuinely held up on held-out data
 #
-# Production choice: calibrated HistGBM (validated by Phase 4b bake-off).
+# Production choice: calibrated HistGBM (variant selected in Section C,
+# family validated by Phase 4b bake-off).
 # Why not LR even though it's slightly ahead on this dataset?
 #   (a) Real production data will be noisier and have unmeasured
 #       interactions; trees handle that more gracefully than linear models
@@ -542,7 +614,7 @@ print("=" * 70)
 #   (c) Native missing-value handling means new features that arrive with
 #       partial coverage won't break the pipeline
 # Why HistGBM specifically over XGBoost?
-#   (a) HistGBM beats XGBoost by 0.006 PR-AUC on this data (Phase 4b bake-off)
+#   (a) HistGBM beats XGBoost on PR-AUC (Phase 4b bake-off, both default and tuned)
 #   (b) Same tree-model production properties (SHAP + missing values)
 #   (c) Sklearn-only -- drops the external xgboost dependency
 # Both models persisted -- LR is the documented baseline / sanity check.

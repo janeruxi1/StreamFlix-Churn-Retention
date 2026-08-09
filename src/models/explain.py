@@ -5,14 +5,18 @@ back to feature contributions, in a mathematically principled way based
 on cooperative game theory. Each feature gets a signed contribution --
 positive pushes the prediction toward CHURN, negative pushes toward RETAIN.
 
-For tree models (XGBoost) we use `TreeExplainer` which is exact and fast.
-Values are in the model's LOG-ODDS output space; sum(shap_values, axis=1)
-+ expected_value == raw model output (before the calibration wrapper).
+For tree models (HistGradientBoosting -- the current production family --
+or XGBoost) we use `TreeExplainer`, which is exact and fast. SHAP's
+TreeExplainer supports HistGBM since 0.35+. Values are in the model's
+LOG-ODDS output space; sum(shap_values, axis=1) + expected_value ==
+raw model output (before the calibration wrapper). For HistGBM the
+"raw model output" is `model.decision_function(X)` (equivalent to
+XGBoost's `predict(output_margin=True)`).
 
 This module deliberately doesn't touch the sklearn CalibratedClassifierCV
-wrapper. We compute SHAP on the underlying uncalibrated XGBoost, which
-tells the correct explanatory story (which features drive risk) even
-though final ranked probabilities come from the calibrated model.
+wrapper. We compute SHAP on the underlying uncalibrated tree model,
+which tells the correct explanatory story (which features drive risk)
+even though final ranked probabilities come from the calibrated model.
 
 Functions:
     compute_shap_values(model, X)          -- returns shap.Explanation
@@ -37,7 +41,11 @@ if TYPE_CHECKING:
 def compute_shap_values(model, X: pd.DataFrame,
                         sample_size: Optional[int] = None,
                         random_state: int = 42):
-    """Run TreeExplainer on an XGBoost model.
+    """Run TreeExplainer on a tree-based model (HistGradientBoosting or XGBoost).
+
+    Model-agnostic across tree families -- SHAP's TreeExplainer walks the
+    fitted tree structure directly, no hyperparameter or family knobs to
+    pass. Currently used with HistGBM (Phase 4's production choice).
 
     For a large test set we can subsample to speed things up -- the
     explanations don't need every row. Set sample_size=None to use
@@ -57,8 +65,9 @@ def global_importance(shap_values,
     """Rank features by mean |SHAP value| across the sample.
 
     This is the CORRECT way to measure feature importance for decisions
-    -- unlike XGBoost's built-in `feature_importances_`, which reports
-    training-time split gain (biased toward high-cardinality features).
+    -- unlike tree models' built-in `feature_importances_` (in XGBoost,
+    HistGBM, etc.), which reports training-time split gain and is biased
+    toward high-cardinality features.
     """
     mean_abs = np.abs(shap_values.values).mean(axis=0)
     mean_signed = shap_values.values.mean(axis=0)
@@ -207,6 +216,84 @@ FEATURE_INTERVENTION_MAP = {
         "lever": "Upgrade-to-annual offer",
         "cost": 12.0,
         "note": "Convert monthly users to annual for higher retention",
+    },
+    # --- Raw engagement levels (low = actionable via re-engagement) ------
+    "watch_hours_last_7d": {
+        "lever": "Re-engagement email sequence",
+        "cost": 1.0,
+        "note": "Low recent watching -> weekly content recap emails",
+    },
+    "watch_hours_last_30d": {
+        "lever": "Re-engagement email sequence",
+        "cost": 1.0,
+        "note": "Low sustained watching -> personalized content push",
+    },
+    "logins_per_day_30d": {
+        "lever": "Re-engagement email sequence",
+        "cost": 1.0,
+        "note": "Low login frequency -> weekly recap emails",
+    },
+    "distinct_titles_7d": {
+        "lever": "Personalized content push",
+        "cost": 1.0,
+        "note": "Narrow recent viewing -> broaden with curated recommendations",
+    },
+    "distinct_titles_30d": {
+        "lever": "Personalized content push",
+        "cost": 1.0,
+        "note": "Low content variety -> curated 'try something new' push",
+    },
+    "watch_per_login_30d": {
+        "lever": "Personalized content push",
+        "cost": 1.0,
+        "note": "Short sessions -> better first-scroll recommendations",
+    },
+    # --- Older-horizon support / payment signals (still actionable) -----
+    "support_tickets_30d": {
+        "lever": "White-glove support callback",
+        "cost": 5.0,
+        "note": "Recent friction -> proactive support outreach",
+    },
+    "payment_failures_90d": {
+        "lever": "Payment method update prompt + $5 credit",
+        "cost": 5.0,
+        "note": "Repeat payment issues -> card update flow + credit",
+    },
+    # --- Explicitly diagnostic (too long-horizon to act on) -------------
+    "watch_hours_last_90d": {
+        "lever": "N/A -- structural signal",
+        "cost": 0.0,
+        "note": "90d level is diagnostic -- act on 7d/30d instead",
+    },
+    "distinct_titles_90d": {
+        "lever": "N/A -- structural signal",
+        "cost": 0.0,
+        "note": "90d breadth is diagnostic -- act on 7d/30d instead",
+    },
+    "support_tickets_90d": {
+        "lever": "N/A -- structural signal",
+        "cost": 0.0,
+        "note": "90d ticket count is diagnostic -- act on 7d/30d instead",
+    },
+    "payment_failures_180d": {
+        "lever": "N/A -- structural signal",
+        "cost": 0.0,
+        "note": "180d payment history is diagnostic -- act on 30d/90d instead",
+    },
+    "titles_per_hour_30d": {
+        "lever": "N/A (diagnostic feature)",
+        "cost": 0.0,
+        "note": "Consumption breadth ratio -- hard to intervene directly",
+    },
+    "active_risk_event_count": {
+        "lever": "N/A (diagnostic feature)",
+        "cost": 0.0,
+        "note": "Composite risk score -- act on underlying features instead",
+    },
+    "is_anniversary_window": {
+        "lever": "N/A -- structural signal",
+        "cost": 0.0,
+        "note": "Renewal-window flag -- diagnostic only",
     },
 }
 
