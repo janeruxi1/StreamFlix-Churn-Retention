@@ -52,6 +52,10 @@ warnings.filterwarnings(
     category=FutureWarning,
     message="Function stable_cumsum is deprecated",
 )
+warnings.filterwarnings(
+    "ignore",
+    message=".*IProgress not found.*",
+)
 
 # Run from project root whether invoked as `python notebooks/05_...` or
 # from a Jupyter cell (which doesn't define __file__).

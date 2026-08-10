@@ -43,7 +43,22 @@
 # %%
 import os
 import sys
+import warnings
 from pathlib import Path
+
+# Silence two harmless third-party warnings triggered by loading the
+# scikit-uplift model. Same rationale as Phase 8; clears itself when
+# sklift releases a version compatible with sklearn 1.8+ and modern
+# ipywidgets. Not our code.
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message="Function stable_cumsum is deprecated",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*IProgress not found.*",
+)
 
 try:
     _project_root = Path(__file__).resolve().parents[1]
@@ -178,6 +193,35 @@ print(f"{'v1 propensity':<16} {v1_summary['n_targeted']:>15,} "
 print(f"{'v2 uplift':<16} {v2_summary['n_targeted']:>15,} "
       f"${v2_summary['total_cost']:>10,.0f} ${v2_summary['net_expected_value']:>10,.0f} "
       f"{v2_summary['roi_multiplier']:>7.2f}x")
+
+# --- EV-break-even threshold math: why v1 and v2 target so differently ----
+# v1 and v2 use different EV formulas, so their "positive-EV" thresholds
+# have different SHAPES. Print the per-tier break-even for each policy so
+# the target-count gap is defensible arithmetic, not a mystery.
+print(f"\n{'-' * 68}")
+print(f"Why the target-count gap? Different EV formulas -> different thresholds:")
+print(f"{'-' * 68}")
+print(f"  v1 EV formula:  P(churn) x {LEVER_UPLIFT:.0%} x LTV - ${LEVER_COST:.0f}")
+print(f"    -> positive EV requires  P(churn) > ${LEVER_COST:.0f} / "
+      f"({LEVER_UPLIFT:.0%} x LTV)")
+print(f"  v2 EV formula:  predicted_lift x LTV - ${LEVER_COST:.0f}")
+print(f"    -> positive EV requires  predicted_lift > ${LEVER_COST:.0f} / LTV")
+print()
+print(f"  Per-tier activation thresholds:")
+print(f"    {'Tier':<10} {'LTV':>7} {'v1: P(churn) >':>17} {'v2: lift >':>15}")
+print(f"    {'-'*10} {'-'*7} {'-'*17} {'-'*15}")
+for tier, tier_ltv in LTV_BY_TIER.items():
+    v1_thresh = LEVER_COST / (LEVER_UPLIFT * tier_ltv)
+    v2_thresh = LEVER_COST / tier_ltv
+    print(f"    {tier:<10} ${tier_ltv:>5.0f}  {v1_thresh:>16.1%} "
+          f"{v2_thresh:>14.1%}")
+print(f"""
+  Read: v1 needs users at moderate-to-high churn probability (~8-17%) to
+  activate. v2 needs only a small positive predicted retention lift (~1-3%).
+  The wider v2 target set (~{v2_summary['n_targeted']/max(v1_summary['n_targeted'],1):.1f}x v1) reflects the uplift model
+  finding the 'persuadable middle' -- users at modest churn risk but high
+  responsiveness that v1's high-risk-first rule filters out.
+""")
 
 
 # %% [markdown]
@@ -514,8 +558,10 @@ print(f"""
 Verdict:
 
 Ship v1 (propensity-based) NOW as the immediate replacement for the
-blanket campaign. Roll out v2 (uplift-based) as a follow-up once we have
-5x current experimental sample (~{n_obs * 5:,} treated users; today: {n_obs:,}).
+blanket campaign. Roll out v2 (uplift-based) as a follow-up once we
+validate the uplift model against a fresh randomized production holdout
+(current single-arm experimental sample: {n_obs:,} treated users at
+credit_5, already 5x the original multi-arm 5k-per-lever design).
 
 Head-to-head evidence on the {n_obs:,} observed treated users, same lever
 ({LEVER}), same budget cap (${BUDGET/1000:.0f}k):
