@@ -17,7 +17,8 @@
 #
 # 1. **What's the current state?** — blanket campaign losing money
 # 2. **What are we recommending?** — targeted policy
-# 3. **What's the payoff?** — net swing of ~$9.6k / month
+# 3. **What's the payoff?** — the monthly net-EV swing (computed live below,
+#    not hardcoded here — auto-updates with the current model + assumptions)
 #
 # ## Design principles for a hero figure
 #
@@ -26,7 +27,14 @@
 # - **Numbers on the bars** — readable without the legend
 # - **Muted colors for status quo, bright color for the recommendation**
 #
-# Output: `reports/figures/07_hero_summary.png`.
+# ## Output + downstream consumers
+#
+# The figure `reports/figures/07_hero_summary.png` is referenced by:
+# - `README.md` (at the top of the project page)
+# - `reports/decision_memo.md` (embedded in the impact section)
+#
+# Rerun this notebook whenever Phase 4 (model) or Phase 6 (policy) change,
+# so the hero figure stays in sync with what the memo claims.
 
 # %%
 import os
@@ -80,18 +88,36 @@ p_churn = model.predict_proba(X)[:, 1]
 ltv = df["plan_tier"].map(LTV_BY_TIER).values
 tenure = df["tenure_months"].values
 
+# Constants pulled from INTERVENTION_MENU (single source of truth) so the
+# hero figure auto-updates when the PM tweaks the menu. Matches how Phase 6
+# and Phase 9 source the same numbers.
+BLANKET_COST   = INTERVENTION_MENU["credit_5"]["cost"]
+BLANKET_UPLIFT = INTERVENTION_MENU["credit_5"]["uplift"]
+BUDGET         = 200_000.0  # $200k governance ceiling (matches Phase 6)
+
 # Blanket m11 baseline
 baseline = simulate_blanket_campaign(
     p_churn=p_churn, ltv=ltv, tenure_months=tenure,
-    cost_per_user=5.0, target_month=11, uplift=0.15,
+    cost_per_user=BLANKET_COST, target_month=11, uplift=BLANKET_UPLIFT,
 )
 
-# Targeted policy at $200k budget
+# Targeted policy at the $200k governance ceiling
 policy = pick_best_lever(p_churn, ltv, INTERVENTION_MENU)
-policy = apply_budget_cap(policy, budget=200_000)
+policy = apply_budget_cap(policy, budget=BUDGET)
 policy = apply_premium_cap(policy, n_total=len(policy),
                            cap_pct=PREMIUM_UPGRADE_CAP_PCT)
 targeted = summarize_policy(policy, targeted_only=True)
+
+# Sanity check -- these should match Phase 6 Section I's verdict exactly
+# (same model, same policy, same budget cap). If they diverge, someone
+# has changed a downstream assumption without rerunning Phase 4.
+print("Sanity check vs Phase 6 Section I:")
+print(f"  Blanket net EV:  ${baseline['net_expected_value']:>12,.0f}  "
+      f"(Phase 6 Section I should match)")
+print(f"  Targeted net EV: ${targeted['net_expected_value']:>12,.0f}  "
+      f"(Phase 6 Section I should match)")
+print(f"  Targeted users:  {targeted['n_targeted']:>12,}      "
+      f"(Phase 6 Section I should match)")
 
 
 # %% [markdown]
@@ -210,8 +236,36 @@ plt.tight_layout()
 out_path = FIG_DIR / "07_hero_summary.png"
 plt.savefig(out_path, dpi=160, bbox_inches="tight")
 print(f"Saved -> {out_path}")
+plt.show()
 
-print("\nHero figure summary:")
-print(f"  Blanket baseline net EV:  ${baseline['net_expected_value']:>10,.0f}")
-print(f"  Targeted policy net EV:   ${targeted['net_expected_value']:>10,.0f}")
-print(f"  Monthly swing:            ${swing:>10,.0f}")
+# Full verdict block (numbers a reader can quote directly into the memo /
+# README / talking points without having to open Phase 6)
+users_multiplier = (targeted["n_targeted"] / max(baseline["n_targeted"], 1))
+revenue_multiplier = (targeted["expected_retained_revenue"]
+                      / max(baseline["expected_retained_revenue"], 1))
+print("\n" + "=" * 60)
+print("Phase 7 hero-figure verdict")
+print("=" * 60)
+print(f"{'':22}{'Blanket m11':>15}{'Targeted':>15}")
+print(f"  {'-'*20}{'-'*15}{'-'*15}")
+print(f"  Users contacted    {baseline['n_targeted']:>15,}"
+      f"{targeted['n_targeted']:>15,}")
+print(f"  Total cost         "
+      f"${baseline['total_cost']:>14,.0f}"
+      f"${targeted['total_cost']:>14,.0f}")
+print(f"  Retained revenue   "
+      f"${baseline['expected_retained_revenue']:>14,.0f}"
+      f"${targeted['expected_retained_revenue']:>14,.0f}")
+print(f"  Net EV / month     "
+      f"${baseline['net_expected_value']:>14,.0f}"
+      f"${targeted['net_expected_value']:>14,.0f}")
+print(f"  ROI                "
+      f"{baseline['roi_multiplier']:>14.2f}x"
+      f"{targeted['roi_multiplier']:>14.2f}x")
+print(f"")
+print(f"  Monthly swing:       ${swing:>+14,.0f}   "
+      f"(targeted - blanket)")
+print(f"  Users multiplier:    {users_multiplier:>14.1f}x  "
+      f"(targeted contacts / blanket contacts)")
+print(f"  Revenue multiplier:  {revenue_multiplier:>14.1f}x  "
+      f"(targeted retained / blanket retained)")

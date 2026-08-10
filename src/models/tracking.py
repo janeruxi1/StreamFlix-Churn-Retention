@@ -23,11 +23,11 @@ Design:
 Usage:
     from src.models.tracking import mlflow_run, register_production_model
 
-    with mlflow_run("xgboost_calibrated") as run:
+    with mlflow_run("hist_gbm_tuned_calibrated") as run:
         if run is not None:
-            run.log_params({"n_estimators": 300, "max_depth": 5})
-            run.log_metrics(xgb_cal_metrics)
-            run.log_model(xgb_cal, name="model")
+            run.log_params({"max_iter": 300, "max_depth": 5})
+            run.log_metrics(hgb_cal_metrics)
+            run.log_model(hgb_cal, name="model")
             winner_run_id = run.run_id
 
     # After picking the winner, promote it to the Registry:

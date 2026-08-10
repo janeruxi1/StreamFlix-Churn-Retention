@@ -10,7 +10,7 @@
 
 ![Hero](reports/figures/07_hero_summary.png)
 
-**Bottom line:** the current blanket $5 credit campaign runs a $4.2k monthly loss. The targeted policy delivers **+$17.7k net expected value** at 1.96× ROI — a **$21.9k monthly swing**. Full analysis in [`notebooks/06_decision_rule.ipynb`](./notebooks/06_decision_rule.ipynb); recommendation in [`reports/decision_memo.md`](./reports/decision_memo.md).
+**Bottom line:** the current blanket $5 credit campaign runs a $4.8k monthly loss. The targeted policy delivers **+$19.1k net expected value** at 1.64× ROI — a **$23.9k monthly swing**. Full analysis in [`notebooks/06_decision_rule.ipynb`](./notebooks/06_decision_rule.ipynb); recommendation in [`reports/decision_memo.md`](./reports/decision_memo.md).
 
 ---
 

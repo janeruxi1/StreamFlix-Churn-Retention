@@ -41,13 +41,9 @@ Design principles (same as train.py):
 """
 from __future__ import annotations
 
-from typing import Tuple
-
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
-from xgboost import XGBClassifier
 
 # scikit-uplift is a hard dep; fail fast with a clear message if missing
 try:

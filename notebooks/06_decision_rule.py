@@ -162,8 +162,21 @@ print("\n" + "=" * 70)
 print("D. BEST-LEVER SELECTION")
 print("=" * 70)
 policy = pick_best_lever(p_churn, ltv, INTERVENTION_MENU)
-print("\nBest-lever distribution (before budget cap):")
-print(policy["best_lever"].value_counts().to_string())
+
+# Best-lever mix (before any caps) -- shows the raw output of the EV rule
+# per user. "none" = all levers had EV <= 0 for this user, so skip them.
+n_total_users = len(policy)
+mix_pre = (policy["best_lever"]
+           .value_counts()
+           .rename_axis("lever")
+           .reset_index(name="n_users"))
+mix_pre["pct_of_base"] = (mix_pre["n_users"] / n_total_users * 100).round(1)
+
+print(f"\nBest-lever distribution (before budget cap, n_base={n_total_users:,}):")
+print(f"  {'lever':<20}  {'n_users':>10}  {'pct_of_base':>12}")
+print(f"  {'-'*20}  {'-'*10}  {'-'*12}")
+for _, r in mix_pre.iterrows():
+    print(f"  {str(r['lever']):<20}  {int(r['n_users']):>10,}  {r['pct_of_base']:>11.1f}%")
 
 
 # %% [markdown]
@@ -186,8 +199,32 @@ targeted = policy[policy["will_target"]]
 print(f"\nBudget cap: ${BUDGET:,.0f}")
 print(f"Users targeted: {len(targeted):,} of {len(policy):,} "
       f"({len(targeted)/len(policy):.1%})")
-print(f"\nLever mix (targeted only):")
-print(targeted["best_lever"].value_counts().to_string())
+
+# Post-cap lever mix (targeted users only) -- what the retention platform
+# will actually send. This is where the "curated_playlist dominates"
+# claim in the memo can be traced back to.
+n_targeted = len(targeted)
+mix_post = (targeted["best_lever"]
+            .value_counts()
+            .rename_axis("lever")
+            .reset_index(name="n_users"))
+mix_post["pct_of_targeted"] = (mix_post["n_users"] / n_targeted * 100).round(1)
+# Attach cost + uplift per lever so the mix is directly readable
+mix_post["cost_per_user"] = mix_post["lever"].map(
+    lambda L: INTERVENTION_MENU.get(L, {}).get("cost", 0))
+mix_post["uplift"] = mix_post["lever"].map(
+    lambda L: INTERVENTION_MENU.get(L, {}).get("uplift", 0))
+mix_post["total_cost"] = mix_post["n_users"] * mix_post["cost_per_user"]
+
+print(f"\nLever mix (targeted users only, n_targeted={n_targeted:,}):")
+print(f"  {'lever':<20}  {'n_users':>8}  {'pct':>6}  "
+      f"{'cost/user':>10}  {'uplift':>7}  {'total_cost':>12}")
+print(f"  {'-'*20}  {'-'*8}  {'-'*6}  {'-'*10}  {'-'*7}  {'-'*12}")
+for _, r in mix_post.iterrows():
+    print(f"  {str(r['lever']):<20}  {int(r['n_users']):>8,}  "
+          f"{r['pct_of_targeted']:>5.1f}%  "
+          f"${r['cost_per_user']:>8.1f}  {r['uplift']:>6.0%}  "
+          f"${r['total_cost']:>11,.0f}")
 
 summary = summarize_policy(policy, targeted_only=True)
 print(f"\nExpected outcome under the targeted policy:")
@@ -250,7 +287,17 @@ print(head_to_head)
 print("\n" + "=" * 70)
 print("G. ROI SWEEP")
 print("=" * 70)
-budgets = np.linspace(10_000, 500_000, 25)
+# Curated budget grid that includes the values cited in the memo ($5k, $10k,
+# $30k operating recommendation, $200k governance ceiling) plus dense
+# sampling in the interesting low-budget region where ROI is highest.
+# Starting at $2k so the sweep catches the point where ROI crosses 2.0x --
+# the earlier $10k floor missed it and made Section G's story inconsistent
+# with the memo.
+budgets = np.array([
+     2_000,   5_000,   7_500,  10_000,  15_000,  20_000,  25_000,
+    30_000,  40_000,  50_000,  75_000, 100_000, 150_000, 200_000,
+   300_000, 500_000,
+], dtype=float)
 sweep_rows = []
 for b in budgets:
     p_sweep = pick_best_lever(p_churn, ltv, INTERVENTION_MENU)
@@ -453,48 +500,25 @@ for h in horizons:
 horizon_df = pd.DataFrame(horizon_rows)
 
 print("\nPolicy KPIs at $200k budget for each horizon:")
-disp = horizon_df.copy()
-disp["horizon"]    = disp["horizon_mo"].map(lambda x: f"{x}mo")
-disp["n_targeted"] = disp["n_targeted"].map("{:,}".format)
-disp["total_cost"] = disp["total_cost"].map("${:,.0f}".format)
-disp["net_ev"]     = disp["net_ev"].map("${:,.0f}".format)
-disp["roi"]        = disp["roi"].map("{:.2f}x".format)
-print(disp[["horizon", "n_targeted", "total_cost", "net_ev", "roi"]]
-      .to_string(index=False))
+# Hand-crafted fixed-width table -- pd.to_string() gets auto-truncated in
+# Jupyter cells when the column count + formatted widths approach the
+# cell display width. Same pattern used in Phase 5 Section F.
+print(f"  {'horizon':>8} {'n_targeted':>12} {'total_cost':>12} "
+      f"{'net_EV':>12} {'ROI':>7}")
+print(f"  {'-'*8} {'-'*12} {'-'*12} {'-'*12} {'-'*7}")
+for _, r in horizon_df.iterrows():
+    marker = "  <- production" if r["horizon_mo"] == RMST_HORIZON_MONTHS else ""
+    print(f"  {int(r['horizon_mo']):>6}mo "
+          f"{int(r['n_targeted']):>12,} "
+          f"${r['total_cost']:>11,.0f} "
+          f"${r['net_ev']:>11,.0f} "
+          f"{r['roi']:>6.2f}x{marker}")
 
-# --- Chart: net EV + n_targeted across horizons -------------------------
-fig, ax1 = plt.subplots(figsize=(10, 5.5))
-color_ev, color_n = "#5B8FF9", "#F6735B"
-
-ax1.plot(horizon_df["horizon_mo"], horizon_df["net_ev"],
-         marker="o", markersize=10, linewidth=2.5, color=color_ev,
-         label="Net EV / month ($, left axis)")
-ax1.axvline(RMST_HORIZON_MONTHS, color="gray", linestyle=":", linewidth=1.5,
-            label=f"production horizon ({RMST_HORIZON_MONTHS}mo)")
-ax1.set_xlabel("LTV horizon (months)")
-ax1.set_ylabel("Net EV / month  ($)", color=color_ev)
-ax1.tick_params(axis="y", labelcolor=color_ev)
-ax1.grid(True, linestyle="--", alpha=0.4)
-ax1.set_xticks(horizons)
-
-ax2 = ax1.twinx()
-ax2.plot(horizon_df["horizon_mo"], horizon_df["n_targeted"],
-         marker="s", markersize=9, linewidth=2, color=color_n,
-         label="Users targeted (right axis)", alpha=0.85)
-ax2.set_ylabel("Users targeted", color=color_n)
-ax2.tick_params(axis="y", labelcolor=color_n)
-
-fig.suptitle("LTV horizon sensitivity -- how much does the decision depend "
-             "on where we draw the horizon?", fontweight="bold")
-# Combine legends from both axes
-lines1, labels1 = ax1.get_legend_handles_labels()
-lines2, labels2 = ax2.get_legend_handles_labels()
-ax1.legend(lines1 + lines2, labels1 + labels2, loc="center right")
-plt.tight_layout()
-plt.savefig(FIG_DIR / "06_ltv_horizon_sensitivity.png",
-            dpi=140, bbox_inches="tight")
-print(f"\nSaved -> {FIG_DIR}/06_ltv_horizon_sensitivity.png")
-plt.show()
+# Note: a dual-axis chart (Net EV + users targeted vs horizon) was
+# considered here but removed. The chart visually implied "extend the
+# horizon = free money" without the survivor-bias context that lives in
+# the paragraph below. Tables + narrative do the job more honestly than
+# a curve that pulls the eye toward the biggest number.
 
 print(f"""
 Read on the horizon choice (production = {RMST_HORIZON_MONTHS} months):
@@ -516,16 +540,34 @@ Read on the horizon choice (production = {RMST_HORIZON_MONTHS} months):
 print("\n" + "=" * 70)
 print("I. PHASE 6 VERDICT")
 print("=" * 70)
-lift_over_baseline = (summary["net_expected_value"] /
-                      max(baseline["net_expected_value"], 1))
-print(f"\nAt $200k budget:")
+
+# Absolute swing (dollars) instead of a multiplier -- the multiplier form
+# breaks when either side is negative or near zero (baseline is negative
+# under blanket, so any ratio is either misleading or undefined).
+swing = summary["net_expected_value"] - baseline["net_expected_value"]
+
+print(f"\nAt $200k governance ceiling:")
 print(f"  Targeted net EV:  ${summary['net_expected_value']:>12,.0f}")
 print(f"  Blanket net EV:   ${baseline['net_expected_value']:>12,.0f}")
-print(f"  Lift over baseline: {lift_over_baseline:.1f}x")
-print(f"\nTargeted ROI: {summary['roi_multiplier']:.2f}x  "
-      f"(target >= 2.0x)")
+print(f"  Absolute swing:   ${swing:>12,.0f}   (targeted minus blanket)")
+print(f"\nTargeted ROI: {summary['roi_multiplier']:.2f}x")
 print(f"Baseline ROI: {baseline['roi_multiplier']:.2f}x")
-print(f"\nReady for Phase 7 (decision memo + Streamlit app).")
+
+# Honest note on the ROI target
+if summary['roi_multiplier'] < 2.0:
+    print(f"""
+Note on the 2.0x ROI target:
+  * At $200k ceiling, targeted ROI is {summary['roi_multiplier']:.2f}x -- below
+    the 2.0x target. This is expected: the ceiling is a governance
+    circuit-breaker, not the operating budget. See Section G for the
+    ROI-vs-total-EV trade-off across budget levels.
+  * Higher ROI is reachable by capping the budget below the point where
+    the policy fills with positive-EV users. That trades total EV for
+    ROI-per-dollar. The recommended operating budget in the memo picks
+    the point that maximizes TOTAL absolute impact, not per-dollar ratio.
+""")
+
+print("Ready for Phase 7 (decision memo + Streamlit app).")
 
 
 # %% [markdown]
@@ -557,21 +599,70 @@ print("""
 print("\n" + "=" * 70)
 print("FINDINGS WORTH FLAGGING")
 print("=" * 70)
-print("""
-1. The current blanket campaign is losing money. $7.9k spent to save
-   $1.6k = $6.3k monthly loss.
 
-2. Budget doesn't bind. Only ~3% of subscribers have positive-EV
-   interventions. Targeted spend = $4.5k vs $200k cap.
+# Compute numbers live so this section can't drift from the actual run.
+# All variables are already in scope from earlier sections.
+blanket_loss  = -baseline["net_expected_value"]
+targeted_ev   = summary["net_expected_value"]
+targeted_roi  = summary["roi_multiplier"]
+n_targeted    = summary["n_targeted"]
+total_cost    = summary["total_cost"]
+n_total       = len(policy)
+pct_targeted  = 100 * n_targeted / n_total
 
-3. ROI = 1.72x, below the 2.0x primary target. Still a $9.6k monthly
-   improvement over the blanket baseline. To push past 2.0x we need
-   stronger model discrimination or higher-uplift levers.
+# Where does ROI cross 2.0x in the budget sweep?
+above_target  = sweep[sweep["roi"] >= 2.0].sort_values("budget", ascending=False)
+if len(above_target) > 0:
+    max_budget_at_target_roi = above_target.iloc[0]["budget"]
+    ev_at_that_budget       = above_target.iloc[0]["net_ev"]
+    roi_finding = (f"ROI clears 2.0x only at budgets <= ${max_budget_at_target_roi/1000:.0f}k "
+                   f"(net EV at that point: ${ev_at_that_budget/1000:.1f}k). "
+                   f"Every larger budget trades ROI for total EV.")
+else:
+    roi_finding = ("ROI does not clear 2.0x at any budget in the sweep -- "
+                   "either the model needs stronger discrimination or the "
+                   "levers need higher uplift.")
 
-4. Recommendation robust to uplift assumptions. Even at 50% weaker
-   uplift, ROI stays positive and beats the blanket.
+# Where does the policy saturate (extra budget stops adding users)?
+sat_n = sweep["n_targeted"].max()
+sat_row = sweep[sweep["n_targeted"] == sat_n].sort_values("budget").iloc[0]
+saturation_budget = sat_row["budget"]
 
-5. credit_5 dominates the lever mix. Playlist and Premium upgrades
-   barely fire. Worth A/B testing to validate lever choice before
-   committing to production.
-""")
+# Lever mix (targeted users only)
+lever_mix = (policy[policy["will_target"]]["best_lever"]
+             .value_counts(normalize=True) * 100).round(1)
+top_lever = lever_mix.index[0]
+top_lever_pct = lever_mix.iloc[0]
+
+# LTV horizon range: is the recommendation robust across horizons?
+horizon_min_ev = horizon_df["net_ev"].min()
+horizon_max_ev = horizon_df["net_ev"].max()
+
+# Uplift sensitivity range
+uplift_min_roi = sens["roi"].min()
+uplift_max_roi = sens["roi"].max()
+
+findings = f"""
+1. The current blanket campaign is losing money. $7.9k spent to retain
+   ~${baseline['expected_retained_revenue']/1000:.1f}k = ${blanket_loss/1000:.1f}k monthly loss (ROI {baseline['roi_multiplier']:.2f}x).
+
+2. Policy saturates at ~${saturation_budget/1000:.0f}k budget with {sat_n:,}
+   targeted users ({100*sat_n/n_total:.0f}% of the base). At the $200k
+   governance ceiling, only ${total_cost/1000:.0f}k of the cap is actually
+   used -- the ceiling is a circuit-breaker, not a binding constraint.
+
+3. Targeted ROI = {targeted_roi:.2f}x at the ${BUDGET/1000:.0f}k ceiling, below the 2.0x
+   primary target. {roi_finding}
+
+4. Recommendation is robust across sensitivity ranges:
+   * Uplift ±50%: ROI stays in [{uplift_min_roi:.2f}x, {uplift_max_roi:.2f}x] -- targeted always beats blanket.
+   * LTV horizon 12-60mo: net EV in [${horizon_min_ev/1000:.1f}k, ${horizon_max_ev/1000:.1f}k] -- direction of recommendation unchanged.
+   Value delivery isn't fragile to our assumptions.
+
+5. `{top_lever}` dominates the lever mix ({top_lever_pct:.0f}% of targeted users).
+   The other {len(lever_mix)-1} lever(s) fire less. Worth A/B testing to
+   validate the lever choice and its uplift assumption before committing
+   to production -- if `{top_lever}`'s real uplift differs from what the PM
+   estimated, the whole policy's economics shift.
+"""
+print(findings)
