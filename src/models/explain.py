@@ -110,188 +110,243 @@ def local_explanation(shap_values,
 
 
 # ---------------------------------------------------------------------
-# Feature -> intervention mapping
+# Feature -> intervention mapping (two-layer design)
 # ---------------------------------------------------------------------
-# Curated by the Retention PM (Marcus Lee). Each entry maps a top
-# feature back to a concrete lever the team can actually pull. Features
-# NOT in this table are considered non-actionable (informational only)
-# so the model exposes them but the decision rule doesn't act on them.
+# Curated by the Retention PM (Marcus Lee). Each entry has two fields:
+#
+#   `lever`           -- DIAGNOSTIC layer: a rich, descriptive name for
+#                        the kind of intervention this feature suggests.
+#                        Used in Phase 5 SHAP walkthroughs so a PM or
+#                        analyst can see WHY a user was flagged.
+#
+#   `tactical_lever`  -- TACTICAL layer: which of Phase 6's 3 operational
+#                        levers (curated_playlist, credit_5, premium_upgrade)
+#                        the retention platform actually sends. Must be
+#                        one of INTERVENTION_MENU's keys in policy.py.
+#                        None = no tactical action (structural/diagnostic).
+#
+# Why two layers: real retention teams don't run 10 different automated
+# campaigns -- they run 2-4 well-tested ones with measured uplift. But a
+# diagnostic vocabulary with 10 lever categories is useful for PMs
+# reading SHAP output -- it tells them WHY a user is at risk. The
+# diagnostic layer collapses into the tactical layer via this crosswalk.
+#
+# Rule of thumb for the crosswalk:
+#   * Engagement / content signals             -> curated_playlist
+#   * Support, payment, promo, high-risk cohort -> credit_5
+#   * Plan/lifecycle structural changes         -> premium_upgrade
+#   * Long-horizon / composite / structural     -> None (diagnostic only)
 FEATURE_INTERVENTION_MAP = {
     "watch_trend_7d_to_30d": {
         "lever": "Personalized content push",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Declining engagement -> curated playlist push notification",
     },
     "watch_trend_30d_to_90d": {
         "lever": "Personalized content push",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Slow-burn disengagement -> re-engagement email + trailer bundle",
     },
     "days_since_last_login": {
         "lever": "Re-engagement email sequence",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Inactive users need a reason to come back",
     },
     "logins_last_30d": {
         "lever": "Re-engagement email sequence",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Low login frequency -> weekly recap emails",
     },
     "support_tickets_7d": {
         "lever": "White-glove support callback",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
-        "note": "Recent ticket escalation -> proactive support outreach",
+        "note": "Recent ticket escalation -> proactive support outreach + goodwill credit",
     },
     "tickets_recency_ratio": {
         "lever": "White-glove support callback",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
         "note": "Sudden burst of tickets = frustration; catch before they cancel",
     },
     "payment_failures_30d": {
         "lever": "Payment method update prompt + $5 credit",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
         "note": "Failed payments often not a churn decision -- fix the bill first",
     },
     "payment_failures_recency_ratio": {
         "lever": "Payment method update prompt + $5 credit",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
         "note": "Recent failures spike -> emergency retry + card update flow",
     },
     "payment_health_score": {
         "lever": "Payment method update prompt + $5 credit",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
         "note": "Composite payment risk score",
     },
     "days_until_promo_expires": {
         "lever": "Extend promo or offer tier upgrade",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
         "note": "Users on the cusp of losing discounts -- prevent sticker shock",
     },
     "promo_expiring_soon_flag": {
         "lever": "Extend promo or offer tier upgrade",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
         "note": "Promo about to expire -> proactive renewal offer",
     },
     "promo_expiry_risk_score": {
         "lever": "Extend promo or offer tier upgrade",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
         "note": "Continuous promo-expiry risk signal",
     },
     "days_since_plan_change": {
         "lever": "Post-downgrade satisfaction check-in",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
-        "note": "Recent plan change -> validate the switch was right",
+        "note": "Recent plan change -> validate the switch was right (light touch)",
     },
     "recent_plan_change_flag": {
         "lever": "Post-downgrade satisfaction check-in",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Same lever, boolean version",
     },
     "plan_change_risk_score": {
         "lever": "Post-downgrade satisfaction check-in",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Continuous plan-change risk signal",
     },
     "is_trial_drop_window": {
         "lever": "Trial-to-paid onboarding sequence",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Month 2 spike -- structured onboarding content",
     },
     "high_risk_segment_flag": {
         "lever": "Trial-to-paid onboarding + $5 credit",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
         "note": "The m2-casual cohort: 15% baseline churn, worth stacking interventions",
     },
     "auto_renew": {
         "lever": "Renewal confirmation dialog",
+        "tactical_lever": "premium_upgrade",
         "cost": 0.0,
-        "note": "Hard to intervene on -- treat as diagnostic, not actionable",
+        "note": "Auto-renew off -> structural nudge toward stickier plan",
     },
     "tenure_months": {
         "lever": "N/A -- structural signal",
+        "tactical_lever": None,
         "cost": 0.0,
         "note": "Tenure is diagnostic, not an intervention target",
     },
     "billing_cycle": {
         "lever": "Upgrade-to-annual offer",
+        "tactical_lever": "premium_upgrade",
         "cost": 12.0,
-        "note": "Convert monthly users to annual for higher retention",
+        "note": "Convert monthly users to annual for higher retention (plan-structure change)",
     },
     # --- Raw engagement levels (low = actionable via re-engagement) ------
     "watch_hours_last_7d": {
         "lever": "Re-engagement email sequence",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Low recent watching -> weekly content recap emails",
     },
     "watch_hours_last_30d": {
         "lever": "Re-engagement email sequence",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Low sustained watching -> personalized content push",
     },
     "logins_per_day_30d": {
         "lever": "Re-engagement email sequence",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Low login frequency -> weekly recap emails",
     },
     "distinct_titles_7d": {
         "lever": "Personalized content push",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Narrow recent viewing -> broaden with curated recommendations",
     },
     "distinct_titles_30d": {
         "lever": "Personalized content push",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Low content variety -> curated 'try something new' push",
     },
     "watch_per_login_30d": {
         "lever": "Personalized content push",
+        "tactical_lever": "curated_playlist",
         "cost": 1.0,
         "note": "Short sessions -> better first-scroll recommendations",
     },
     # --- Older-horizon support / payment signals (still actionable) -----
     "support_tickets_30d": {
         "lever": "White-glove support callback",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
-        "note": "Recent friction -> proactive support outreach",
+        "note": "Recent friction -> proactive support outreach + goodwill credit",
     },
     "payment_failures_90d": {
         "lever": "Payment method update prompt + $5 credit",
+        "tactical_lever": "credit_5",
         "cost": 5.0,
         "note": "Repeat payment issues -> card update flow + credit",
     },
     # --- Explicitly diagnostic (too long-horizon to act on) -------------
     "watch_hours_last_90d": {
         "lever": "N/A -- structural signal",
+        "tactical_lever": None,
         "cost": 0.0,
         "note": "90d level is diagnostic -- act on 7d/30d instead",
     },
     "distinct_titles_90d": {
         "lever": "N/A -- structural signal",
+        "tactical_lever": None,
         "cost": 0.0,
         "note": "90d breadth is diagnostic -- act on 7d/30d instead",
     },
     "support_tickets_90d": {
         "lever": "N/A -- structural signal",
+        "tactical_lever": None,
         "cost": 0.0,
         "note": "90d ticket count is diagnostic -- act on 7d/30d instead",
     },
     "payment_failures_180d": {
         "lever": "N/A -- structural signal",
+        "tactical_lever": None,
         "cost": 0.0,
         "note": "180d payment history is diagnostic -- act on 30d/90d instead",
     },
     "titles_per_hour_30d": {
         "lever": "N/A (diagnostic feature)",
+        "tactical_lever": None,
         "cost": 0.0,
         "note": "Consumption breadth ratio -- hard to intervene directly",
     },
     "active_risk_event_count": {
         "lever": "N/A (diagnostic feature)",
+        "tactical_lever": None,
         "cost": 0.0,
         "note": "Composite risk score -- act on underlying features instead",
     },
     "is_anniversary_window": {
         "lever": "N/A -- structural signal",
+        "tactical_lever": None,
         "cost": 0.0,
         "note": "Renewal-window flag -- diagnostic only",
     },
@@ -301,8 +356,10 @@ FEATURE_INTERVENTION_MAP = {
 def map_to_intervention(feature_name: str) -> dict:
     """Look up the intervention lever for a feature.
 
-    Returns a dict with 'lever', 'cost', 'note'. If no mapping exists
-    (feature is structural/diagnostic), returns a 'no lever' placeholder.
+    Returns a dict with 'lever' (diagnostic name), 'tactical_lever'
+    (one of Phase 6's 3 operational levers or None), 'cost', and 'note'.
+    If no mapping exists (feature is structural/diagnostic), returns a
+    'no lever' placeholder with tactical_lever=None.
     """
     # Strip one-hot suffix, e.g. 'plan_tier_Basic' -> 'plan_tier'
     key = feature_name.rsplit("_", 1)[0] if "_" in feature_name else feature_name
@@ -311,6 +368,7 @@ def map_to_intervention(feature_name: str) -> dict:
             return FEATURE_INTERVENTION_MAP[candidate]
     return {
         "lever": "N/A (diagnostic feature)",
+        "tactical_lever": None,
         "cost": 0.0,
         "note": "Non-actionable signal -- model uses it for prediction only",
     }

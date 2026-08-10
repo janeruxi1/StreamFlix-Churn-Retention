@@ -9,8 +9,9 @@ Why this module exists:
     artifact and stays in sync automatically.
 
 The consistency chain the constants below enforce:
-    1. Phase 4 trains  xgb_cal (calibrated XGBoost)
-    2. Phase 4 pickles xgb_cal    -> CHURN_MODEL_PATH  (key: CHURN_MODEL_ARTIFACT_KEY)
+    1. Phase 4 trains  hgb_cal (calibrated HistGradientBoosting -- default
+       vs Optuna-tuned, winner selected on TEST PR-AUC)
+    2. Phase 4 pickles hgb_cal    -> CHURN_MODEL_PATH  (key: CHURN_MODEL_ARTIFACT_KEY)
     3. Phase 4 registers same run -> CHURN_MODEL_REGISTRY_NAME @production
     4. Streamlit + Phase 5-7 load -> CHURN_MODEL_PATH  (same key)
 
@@ -34,10 +35,10 @@ from typing import Any, Dict, Tuple
 # =====================================================================
 CHURN_MODEL_PATH = Path("models/churn_model_v1.pkl")
 CHURN_MODEL_REGISTRY_NAME = "streamflix_churn_production"
-CHURN_MODEL_TYPE = "XGBoost + Platt calibration"
+CHURN_MODEL_TYPE = "HistGradientBoosting + Platt calibration"
 
 # The pickle at CHURN_MODEL_PATH is a dict with the following keys:
-#   production_model  -- calibrated XGBoost (Streamlit + Phase 5-7 use this)
+#   production_model  -- calibrated HistGradientBoosting (Streamlit + Phase 5-7 use this)
 #   baseline_model    -- LR baseline (documented reference; not shipped)
 #   feature_names     -- ordered list for aligning inference rows
 #   metrics           -- test-set PR-AUC / ROC-AUC / Brier / log_loss
@@ -117,9 +118,9 @@ def load_production_churn_model() -> Tuple[Any, Dict[str, Any]]:
     """Load the currently-shipped churn model (Phase 4 output).
 
     Returns:
-        (model, artifact_dict) -- the calibrated XGBoost plus the full
-        pickle dict (feature_names, metrics, etc.) for callers that
-        need the metadata.
+        (model, artifact_dict) -- the calibrated HistGradientBoosting
+        plus the full pickle dict (feature_names, metrics, etc.) for
+        callers that need the metadata.
 
     Raises:
         FileNotFoundError if the pickle doesn't exist.

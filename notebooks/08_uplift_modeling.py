@@ -92,6 +92,13 @@ FOCUS_LEVER = UPLIFT_FOCUS_LEVER
 
 # %% [markdown]
 # ## A. Setup — load experimental data, filter to focus lever
+#
+# **Lever context:** `credit_5` is Phase 6's **mid-cost tactical lever** ($5 cost,
+# 15% constant-uplift assumption in the propensity policy). Multiple diagnostic
+# categories collapse into it via the crosswalk in Phase 5 Section H (support
+# friction, payment issues, promo-expiry, high-risk cohort). This notebook
+# learns the **per-user causal uplift** for that one lever, replacing the
+# constant assumption with a heterogeneous estimate.
 
 # %%
 print("=" * 70)
@@ -296,15 +303,44 @@ plt.savefig(FIG_DIR / "08_decile_lift.png", dpi=140, bbox_inches="tight")
 print(f"\nSaved -> {FIG_DIR}/08_decile_lift.png")
 plt.show()
 
-# Sleeping-dog check: bottom decile should show actual_lift close to 0
-# or NEGATIVE (treatment hurts these users). If our model works, the top
-# decile should show much larger actual lift than the bottom decile.
-n_persuadables = int((retention_lift > 0.02).sum())
-n_sleeping_dogs = int((retention_lift < -0.02).sum())
-print(f"\nUsers with predicted retention lift > +0.02 (persuadables): "
+# Sleeping-dog check + persuadable count.
+# Threshold is the EV break-even: user is intervention-worthy when
+#     retention_lift * LTV > cost  <=>  retention_lift > cost / LTV
+# Using the average LTV across the sample (weighted by tier mix) instead of
+# a hardcoded 0.02 so this stays accurate if LTV assumptions change.
+from src.decisions.policy import INTERVENTION_MENU, LTV_BY_TIER
+lever_cost = INTERVENTION_MENU[FOCUS_LEVER]["cost"]
+ltv_mean = df.loc[X_test.index, "plan_tier"].map(LTV_BY_TIER).mean()
+persuadable_threshold = lever_cost / ltv_mean
+# Symmetric band on the negative side to flag confident sleeping dogs
+sleeping_dog_threshold = -persuadable_threshold
+
+n_persuadables = int((retention_lift > persuadable_threshold).sum())
+n_sleeping_dogs = int((retention_lift < sleeping_dog_threshold).sum())
+print(f"\nEV-break-even threshold for {FOCUS_LEVER}: "
+      f"cost ${lever_cost:.0f} / LTV_avg ${ltv_mean:.0f} = "
+      f"{persuadable_threshold:.4f} retention lift")
+print(f"Users with predicted retention lift > +{persuadable_threshold:.4f} "
+      f"(persuadables above EV threshold): "
       f"{n_persuadables:,} ({n_persuadables / len(retention_lift):.1%})")
-print(f"Users with predicted retention lift < -0.02 (sleeping dogs): "
+print(f"Users with predicted retention lift < {sleeping_dog_threshold:+.4f} "
+      f"(confident sleeping dogs): "
       f"{n_sleeping_dogs:,} ({n_sleeping_dogs / len(retention_lift):.1%})")
+
+# Monotonicity sanity check on the decile actual-lift column: a good
+# ranker should have actual retention lift roughly monotone-decreasing
+# from D9 (top persuadables) to D0 (bottom). Count how many adjacent-decile
+# pairs respect the ordering.
+actual_by_decile = [r["actual"] for r in decile_rows]  # already D9 -> D0
+n_pairs = len(actual_by_decile) - 1
+n_monotone = sum(1 for i in range(n_pairs)
+                 if actual_by_decile[i] >= actual_by_decile[i + 1])
+top_bottom_gap = actual_by_decile[0] - actual_by_decile[-1]
+print(f"\nMonotonicity: {n_monotone}/{n_pairs} adjacent decile pairs "
+      f"respect D9 >= ... >= D0 ordering "
+      f"({'strong' if n_monotone >= n_pairs - 1 else 'noisy'} ranker signal).")
+print(f"Top-vs-bottom decile actual-lift gap: {top_bottom_gap:+.4f}  "
+      f"(bigger positive gap = better discrimination).")
 
 
 # %% [markdown]
@@ -347,13 +383,32 @@ register_production_model(
 
 # %%
 print("\n" + "=" * 70)
-print("F. VERDICT + PHASE 6 HANDOFF")
+print("F. VERDICT + PHASE 9 HANDOFF")
 print("=" * 70)
+
+# --- Business-dollar translation of the Qini / retention-lift metrics ---
+# These raw numbers land flat with a stakeholder. Translate to dollars
+# using the same LTV_avg + cost we used for the persuadable threshold.
+retention_at_10 = results[winner_name]["retention_lift_at_10pct"]
+retention_at_30 = results[winner_name]["retention_lift_at_30pct"]
+n_eligible = len(X_test)  # eligible = user could have been targeted
+# @10% budget: target ~10% of eligible users, retention_lift extra saves
+users_at_10  = int(n_eligible * 0.10)
+users_at_30  = int(n_eligible * 0.30)
+extra_saves_at_10  = users_at_10 * retention_at_10
+extra_saves_at_30  = users_at_30 * retention_at_30
+dollar_gain_at_10  = extra_saves_at_10 * ltv_mean
+dollar_gain_at_30  = extra_saves_at_30 * ltv_mean
+cost_at_10 = users_at_10 * lever_cost
+cost_at_30 = users_at_30 * lever_cost
+net_ev_at_10 = dollar_gain_at_10 - cost_at_10
+net_ev_at_30 = dollar_gain_at_30 - cost_at_30
+
 print(f"""
 Winner on Qini AUC: {winner_name}
-  Qini AUC          : {results[winner_name]['qini_auc']:+.4f}
-  Retention lift @30%: {results[winner_name]['retention_lift_at_30pct']:+.4f}
-  Retention lift @10%: {results[winner_name]['retention_lift_at_10pct']:+.4f}
+  Qini AUC           : {results[winner_name]['qini_auc']:+.4f}
+  Retention lift @30%: {retention_at_30:+.4f}   ({retention_at_30 * 100:+.2f}pp)
+  Retention lift @10%: {retention_at_10:+.4f}   ({retention_at_10 * 100:+.2f}pp)
 
 Interpretation:
   Random ranker would score Qini AUC = 0. A positive score means our
@@ -361,11 +416,24 @@ Interpretation:
   Retention lift @10% = additional retained users per targeted user
   vs. random targeting -- directly the ROI upside for a tight budget.
 
-Phase 6 handoff:
-  Load models/uplift_{FOCUS_LEVER}_v1.pkl in the decision-rule notebook
-  and replace the constant `uplift` field in INTERVENTION_MENU with
-  the per-user predicted retention lift. See pick_best_lever_uplift()
-  in src/decisions/policy.py.
+Business dollar impact (LTV_avg = ${ltv_mean:.0f}, {FOCUS_LEVER} cost = ${lever_cost:.0f}):
+  * Test set has n={n_eligible:,} eligible users.
+  * Target top 10%: {users_at_10:,} users -> ~{extra_saves_at_10:.0f} extra retained
+    users vs random ranking -> ${dollar_gain_at_10:,.0f} extra revenue
+    at ${cost_at_10:,.0f} extra cost -> net ${net_ev_at_10:+,.0f} EV.
+  * Target top 30%: {users_at_30:,} users -> ~{extra_saves_at_30:.0f} extra retained
+    users vs random -> ${dollar_gain_at_30:,.0f} extra revenue
+    at ${cost_at_30:,.0f} extra cost -> net ${net_ev_at_30:+,.0f} EV.
+
+Phase 9 handoff (this is where the uplift model gets used):
+  * Phase 9 (`notebooks/09_head_to_head.py`) loads this pickle via
+    `src/models/production.py:load_production_uplift_model()` and runs
+    a three-way head-to-head against v0 (blanket) and v1 (propensity,
+    Phase 6). The uplift-aware policy uses per-user predicted retention
+    lift here, not the constant 15% assumption Phase 6 uses.
+  * Phase 6 stays on the propensity + constant-uplift rule -- v1 is
+    still the shipping policy; v2 (uplift-aware) is validated in
+    Phase 9 before we'd promote it.
 
 MLflow: browse runs under experiment 'streamflix_churn' in `mlflow ui`.
 """)

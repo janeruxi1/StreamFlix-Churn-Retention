@@ -31,8 +31,9 @@
 # | **D. Beeswarm** | Direction + magnitude across the sample |
 # | **E. Dependence** | How SHAP shifts with feature value for the top 3 drivers |
 # | **F. Local explanations** | Three worked examples: HIGH / MARGINAL / LOW risk |
-# | **G. Intervention map** | Feature → lever + cost lookup table |
-# | **H. Verdict** | Handoff to Phase 6 decision rule |
+# | **G. Diagnostic intervention map** | Feature → diagnostic lever + cost + note |
+# | **H. Diagnostic → tactical crosswalk** | How the 10 diagnostic categories collapse into Phase 6's 3 operational levers |
+# | **I. Verdict** | Handoff to Phase 6 decision rule |
 #
 # All figures saved under `reports/figures/`.
 
@@ -314,57 +315,122 @@ for label, idx in example_indices:
     if not top_risk.empty:
         feat = top_risk["feature"].iloc[0]
         lever = map_to_intervention(feat)
-        print(f"  -> Lever: {lever['lever']} "
-              f"(cost=${lever['cost']:.0f}) -- {lever['note']}")
+        tactical = lever.get("tactical_lever") or "none (diagnostic only)"
+        print(f"  -> Diagnostic: {lever['lever']} -- {lever['note']}")
+        print(f"     Tactical (Phase 6): {tactical}"
+              + (f"  (cost=${lever['cost']:.0f})" if lever['cost'] > 0 else ""))
 
 
 # %% [markdown]
-# ## G. Feature → intervention mapping table
+# ## G. Diagnostic intervention map
 #
-# The bridge between model and decision rule. Every flagged feature has a paired lever
-# (or "no lever" if the feature is diagnostic-only). This mapping was curated with the
-# PM and lives in `src/models/explain.py:FEATURE_INTERVENTION_MAP`.
+# The bridge between model and decision rule. Every flagged feature has a
+# paired **diagnostic lever** (or "no lever" if the feature is
+# diagnostic-only) with a rich descriptive name that tells an analyst /
+# PM reading SHAP output WHY the user is at risk. This mapping was
+# curated with the Retention PM and lives in
+# `src/models/explain.py:FEATURE_INTERVENTION_MAP`.
+#
+# Section H shows how these diagnostic categories collapse into Phase 6's
+# 3 operational levers (`curated_playlist`, `credit_5`, `premium_upgrade`)
+# — the actual crosswalk used by the retention platform.
 
 # %%
 print("\n" + "=" * 70)
-print("G. FEATURE -> INTERVENTION MAPPING")
+print("G. DIAGNOSTIC INTERVENTION MAP")
 print("=" * 70)
 lever_rows = []
 for feat, spec in FEATURE_INTERVENTION_MAP.items():
     lever_rows.append({
         "feature": feat,
-        "lever": spec["lever"],
-        "cost": spec["cost"],
-        "note": spec["note"],
+        "lever":   spec["lever"],
+        "cost":    spec["cost"],
+        "note":    spec["note"],
     })
 lever_df = pd.DataFrame(lever_rows)
-print(lever_df.to_string(index=False))
+# Hand-crafted fixed-width print to avoid pandas auto-truncation
+FW, LW, CW = 32, 42, 6
+print(f"  {'feature':<{FW}}  {'diagnostic_lever':<{LW}}  {'cost':>{CW}}  note")
+print(f"  {'-'*FW}  {'-'*LW}  {'-'*CW}  ----")
+for _, r in lever_df.iterrows():
+    feat = str(r['feature'])[:FW]
+    lev  = str(r['lever'])[:LW]
+    cost = f"${r['cost']:.0f}" if r['cost'] > 0 else "  --"
+    print(f"  {feat:<{FW}}  {lev:<{LW}}  {cost:>{CW}}  {r['note']}")
 
 
 # %% [markdown]
-# ## H. Verdict + handoff to Phase 6
+# ## H. Diagnostic → tactical crosswalk (top 5 SHAP drivers)
 #
-# Roll up the top drivers, count how many have actionable levers, and describe what
-# Phase 6 will consume: per-user P(churn), top SHAP driver, lever cost, lever uplift,
-# LTV by tier.
+# The rich diagnostic vocabulary in Section G collapses into Phase 6's
+# **3 operational levers** through a crosswalk. Real retention platforms
+# don't run 10 different automated campaigns — they run 2–4 well-tested
+# ones with measured uplift. The diagnostic layer is for humans reading
+# explanations; the tactical layer is what the platform actually sends.
+#
+# This section shows the crosswalk for the **top 5 SHAP drivers** from
+# Section C — the features that actually move the model's output the most,
+# so the ones Phase 6 will most often route on. Full crosswalk for all 35
+# features lives in `src/models/explain.py:FEATURE_INTERVENTION_MAP`.
+#
+# **Rule of thumb:**
+# - Engagement / content signals → `curated_playlist` (cheap, wide reach)
+# - Support / payment / promo / trial-friction signals → `credit_5` (goodwill gesture)
+# - Plan-structure / renewal signals → `premium_upgrade` (long-term retention)
+# - Long-horizon or composite signals → None (diagnostic only)
 
 # %%
 print("\n" + "=" * 70)
-print("H. PHASE 5 VERDICT")
+print("H. DIAGNOSTIC -> TACTICAL CROSSWALK  (top 5 SHAP drivers)")
 print("=" * 70)
-top_5 = importance.head(5)["feature"].tolist()
-print(f"\nTop 5 SHAP drivers overall:")
-for feat in top_5:
-    lever = map_to_intervention(feat)
-    print(f"  - {feat:<35}  lever: {lever['lever']}")
-print(
-    f"\nOf the top 15 features, "
-    f"{sum(1 for f in importance['feature'] if map_to_intervention(f)['cost'] > 0)}"
-    f" have an actionable intervention lever."
-)
+
+top_5_features = importance.head(5)["feature"].tolist()
+
+FW, DW, TW = 32, 42, 20
+print(f"  {'feature':<{FW}}  {'diagnostic_lever':<{DW}}  {'tactical_lever':<{TW}}")
+print(f"  {'-'*FW}  {'-'*DW}  {'-'*TW}")
+for feat in top_5_features:
+    spec = map_to_intervention(feat)
+    diag = str(spec["lever"])[:DW]
+    tact = str(spec.get("tactical_lever") or "-- diagnostic --")[:TW]
+    print(f"  {str(feat)[:FW]:<{FW}}  {diag:<{DW}}  {tact:<{TW}}")
+
+print(f"""
+Read on the top 5 SHAP drivers:
+  Each of the model's most influential features has an explicit route
+  from diagnostic reason (what an analyst reads in SHAP) to tactical
+  lever (what Phase 6 actually sends). No orphan diagnostic categories,
+  no undocumented tactical assumptions. See Section G for the full
+  35-feature diagnostic map and src/models/explain.py for the underlying
+  crosswalk logic.
+""")
+
+
+# %% [markdown]
+# ## I. Verdict + handoff to Phase 6
+#
+# Section H already shows the top 5 SHAP drivers with their diagnostic and
+# tactical levers. This section rolls up the actionability count and
+# describes what Phase 6 will consume from Phase 5.
+
+# %%
+print("\n" + "=" * 70)
+print("I. PHASE 5 VERDICT + HANDOFF")
+print("=" * 70)
+
+# Actionability rollup across the top 15 SHAP drivers
+top_15 = importance.head(15)["feature"].tolist()
+n_actionable_top15 = sum(1 for f in top_15
+                         if map_to_intervention(f).get("tactical_lever"))
+print(f"\nActionability of the top 15 SHAP drivers:")
+print(f"  * {n_actionable_top15} / 15 route to a tactical lever "
+      f"(curated_playlist, credit_5, or premium_upgrade)")
+print(f"  * {15 - n_actionable_top15} / 15 are diagnostic-only "
+      f"(structural / long-horizon / composite)")
+
 print("\nHandoff to Phase 6 (cost-aware decision rule):")
 print("  - Per-user P(churn) from the calibrated HistGBM")
-print("  - Per-user top SHAP driver from this notebook")
-print("  - Intervention cost + expected uplift from the lever mapping above")
+print("  - Per-user top SHAP driver + its tactical lever (Section H crosswalk)")
+print("  - Intervention cost + expected uplift from INTERVENTION_MENU")
 print("  - LTV by plan tier from the scenario brief")
 print("\nDecision rule = argmax over levers of (P(churn) x uplift x LTV - cost).")

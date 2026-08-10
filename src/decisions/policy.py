@@ -8,7 +8,7 @@ Expected value per user under lever L:
     EV(user, L) = P(churn|user) * uplift(L) * LTV(tier) - cost(L)
 
 Where:
-    P(churn|user)  from the calibrated XGBoost (Phase 4)
+    P(churn|user)  from the calibrated HistGradientBoosting (Phase 4)
     uplift(L)      fraction of would-have-churners that L retains
     LTV(tier)      lifetime value of retained user, by plan
     cost(L)        one-time cost of running intervention L

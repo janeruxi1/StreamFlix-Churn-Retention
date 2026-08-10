@@ -8,11 +8,11 @@
 
 ## TL;DR
 
-The current blanket $5 credit campaign at tenure month 11 is running at an estimated **$4.2k monthly loss** — $7.9k spent to retain $3.8k in expected revenue. The proposed cost-aware targeting policy delivers **+$17.7k net expected value per month** at ~2× the blanket spend but 4× the targeting volume. Net swing: **+$21.9k/month**.
+The current blanket $5 credit campaign at tenure month 11 is running at an estimated **$4.8k monthly loss** — $7.9k spent to retain $3.1k in expected revenue. The proposed cost-aware targeting policy delivers **+$19.1k net expected value per month** at ~4× the blanket spend but 7× the targeting volume. Net swing: **+$23.9k/month**.
 
 **Recommendation: ship the targeted policy as v1. Sunset the blanket campaign.**
 
-Targeted policy ROI comes in at 1.96×, essentially at the 2.0× threshold the metrics framework set at kickoff. Every scenario in the sensitivity analysis still beats the blanket, and the policy is robust across ±50% uplift assumptions.
+Targeted policy ROI comes in at 1.64× at the $200k governance ceiling — below the 2.0× threshold set at kickoff. This is the honest read of the trade-off: Phase 4's Optuna-tuned HistGBM surfaces more borderline positive-EV users than defaults did, which raises **total net EV** (from $17.7k → $19.1k) but pulls **ROI** down as the target set widens with users near the EV=0 boundary. Section G's budget sweep shows ROI clears 2.0× only at very small budgets (~$5k → 2.24× ROI, but only $6.2k EV). The recommended $30k operating budget maximizes total absolute impact; ROI-first stakeholders can pick a lower point on the same curve. Sensitivity holds across ±50% uplift assumptions and across 12–60 month LTV horizons (Phase 6 Sections H and H.5) — the targeted policy beats the blanket in every scenario tested.
 
 ---
 
@@ -24,7 +24,7 @@ Analysis of the last snapshot shows:
 
 - ~1,600 users hit m11 in a given month; all get the credit
 - ~5.3% of subscribers churn in any given 30-day window
-- Applying our best estimate of intervention uplift (~15% of would-have-churners retained) to the m11 population produces $3.8k in expected retained revenue against $7.9k in cost — a **net loss of $4.2k/month**
+- Applying our best estimate of intervention uplift (~15% of would-have-churners retained) to the m11 population produces $3.1k in expected retained revenue against $7.9k in cost — a **net loss of $4.8k/month**
 
 The blanket approach fails because most m11 users weren't going to churn anyway. We're paying to retain people who never left.
 
@@ -50,19 +50,35 @@ We target the user only if the best available lever has positive EV.
 
 | Metric | Current (blanket m11) | Proposed (targeted) | Δ |
 |---|---|---|---|
-| Users contacted | 1,587 | 6,313 | +4,726 |
-| Total cost | $7,935 | $18,404 | +$10,469 |
-| Expected retained revenue | $3,765 | $36,128 | **+$32,363** |
-| Net expected value | −$4,170 | **+$17,724** | **+$21,894** |
-| ROI | 0.47× | **1.96×** | +1.49× |
+| Users contacted | 1,587 | 10,933 | +9,346 |
+| Total cost | $7,935 | $30,162 | +$22,227 |
+| Expected retained revenue | $3,137 | $49,249 | **+$46,112** |
+| Net expected value | −$4,798 | **+$19,087** | **+$23,885** |
+| ROI | 0.40× | **1.64×** | +1.24× |
 
-The targeted policy contacts ~4× more users than the blanket but generates ~10× the retained revenue, because it aims at the users with highest expected value rather than everyone hitting a specific tenure milestone.
+The targeted policy contacts ~6.9× more users than the blanket but generates ~15.7× the retained revenue, because it aims at the users with highest expected value rather than everyone hitting a specific tenure milestone.
 
 ### Lever mix under the targeted policy
 
-- `credit_5` (dominant): most users where any lever is positive-EV
-- `curated_playlist`: small tail of low-cost interventions
-- `premium_upgrade`: rare, gated by a 5% base cap to protect margins
+Two ways to look at the mix — by user count and by dollar spend. They tell different stories:
+
+| Lever | Cost/user | Uplift | Users targeted | % of targeted | Total spend | % of budget |
+|---|---:|---:|---:|---:|---:|---:|
+| `curated_playlist` | $1 | 5% | 7,608 | **69.6%** | $7,608 | 25.2% |
+| `credit_5` | $5 | 15% | 2,478 | 22.7% | $12,390 | **41.1%** |
+| `premium_upgrade` | $12 | 25% | 847 | 7.7% | $10,164 | 33.7% |
+| **Total** | | | **10,933** | **100%** | **$30,162** | **100%** |
+
+- **By user count**, `curated_playlist` dominates at ~70%. It's the cheapest lever ($1, 5% uplift), so it has the lowest EV break-even threshold — it captures the broadest population of borderline-positive-EV users.
+- **By dollar spend**, the picture is much more balanced. `credit_5` accounts for the most total spend (41%) despite only 23% of users, because it costs 5× per user. `premium_upgrade` reaches 8% of users but 34% of budget at $12 each.
+- **Insight for the retention team:** the fact that "curated_playlist dominates" understates how much of the budget goes into the higher-cost interventions. A CFO looking at where the dollars flow sees a roughly-thirds split across the three levers, not the 70/23/8 user split.
+- **`premium_upgrade` gating:** already at the 5% base cap floor (847 / ~50k = 1.7% of base, well below the 5% guardrail), so we're not margin-compressing.
+
+Source: `notebooks/06_decision_rule.py` Section D + E lever-mix tables.
+
+### Two-layer lever design (diagnostic vs. tactical)
+
+Phase 5's SHAP output uses a **rich diagnostic vocabulary** (`Personalized content push`, `Re-engagement email sequence`, `White-glove support callback`, etc. — ~10 categories) so a PM reading the explanations sees WHY a user is at risk in specific terms. Phase 6's decision rule uses the **3 operational levers** above — what the retention platform can actually auto-send at scale. The two layers connect through a documented crosswalk (see `notebooks/05_shap_levers.ipynb` Section G and `src/models/explain.py:FEATURE_INTERVENTION_MAP`). Rule of thumb: engagement signals → `curated_playlist`, friction / payment / promo signals → `credit_5`, plan-structure signals → `premium_upgrade`. Real retention teams don't run 10 automated campaigns; they run 2–4 well-tested ones with measured uplift. The two-layer split gets analyst-facing diagnostic richness AND ship-ready operational simplicity in the same system.
 
 ### How the targeting works — lift analysis
 
@@ -94,19 +110,22 @@ This is the mechanic that makes the ROI story work — most m11 users the blanke
 
 **Model discrimination is modest.** PR-AUC = 0.17, ROC-AUC = 0.74, top-10% lift = 3.5× (see the lift chart above — steep decay from 3.5× at the top decile to 1.0× at the bottom, monotonic throughout, which is what a healthy ranking model looks like). The synthetic training data has no unmeasured interactions that a real production dataset would provide. In practice, we'd expect the model to improve as event-stream features (browsing, video-completion rates, notification opens) come online.
 
-**Budget doesn't currently bind — and that's a deliberate distinction between operating budget and governance ceiling.** Only ~13% of subscribers have any positive-EV lever, so the full targeted spend is $18.4k — far below the $200k cap. The budget-vs-ROI curve from the sweep in Phase 6 tells the story:
+**Budget doesn't currently bind — and that's a deliberate distinction between operating budget and governance ceiling.** ~22% of subscribers have some positive-EV lever, but the policy naturally saturates at ~$30k of spend (~11k users) — beyond that point there are no more positive-EV users to target. So the full spend is $30k — far below the $200k governance ceiling. The budget-vs-ROI curve from the sweep in Phase 6 tells the story:
 
 | Budget | Users targeted | Spend | Net EV | ROI |
 |---|---|---|---|---|
-| $10k | 1,007 | $10k | $14.7k | **2.47×** (peak) |
-| $30k | 6,313 | $18k | $17.7k | 1.96× (plateau) |
-| $50k–$200k | 6,313 | $18k | $17.7k | 1.96× (dormant) |
+| $5k | 416 | $5k | $6.2k | **2.24×** (peak) |
+| $7.5k | 625 | $7.5k | $7.9k | 2.06× (last budget clearing 2.0×) |
+| $10k | 833 | $10k | $9.2k | 1.92× |
+| $20k | 2,814 | $20k | $15.5k | 1.78× |
+| $30k | 10,771 | $30k | $19.1k | 1.64× (saturates here) |
+| $50k–$200k | 10,933 | $30k | $19.1k | 1.63× (dormant — no more positive-EV users) |
 
 Two useful reads on this:
 
 - **Operating budget ≈ $30k.** That's the point where marginal spend stops adding value at current model quality. Everything above earns 0 additional EV.
 - **Governance ceiling = $200k.** Acts as a circuit-breaker for pathological cases (data anomaly, model bug that recommends spamming everyone). Doesn't bind under normal operation — but you want a hard stop, especially for a first production deployment.
-- **The trade-off:** at $10k budget, ROI peaks at 2.47× but total EV is $3k lower. At $30k, ROI is 1.96× but total EV is maximized. Which to optimize depends on the CFO's answer to *"do we care more about ROI-per-dollar or total dollar impact?"* — for a v1 launch, I'd recommend the $30k operating budget (maximize total impact) with the $200k governance ceiling in place.
+- **The trade-off:** at $5k budget, ROI peaks at 2.24× but total EV is only $6.2k. At $10k, ROI = 1.92× and EV = $9.2k. At $30k, ROI is 1.64× but total EV is maximized at $19.1k. Which to optimize depends on the CFO's answer to *"do we care more about ROI-per-dollar or total dollar impact?"* — for a v1 launch, I'd recommend the $30k operating budget (maximize total impact) with the $200k governance ceiling in place. If the 2.0× ROI target is a hard constraint from finance, a $10k operating budget is the largest option that stays inside it (1.92× ≈ 2.0×).
 
 **Adding budget above ~$30k doesn't buy more targeting on this data;** we'd need either a stronger model (event-stream features would push more users above the EV threshold) or higher-uplift interventions to grow the target set. The gap between $30k operating and $200k ceiling is the growth headroom.
 
@@ -130,13 +149,13 @@ Two useful reads on this:
 
 ## Path to a clean 2.0× ROI
 
-We're at 1.96× — essentially at target but not clearly above it, and sensitivity shows we barely crack it under favorable uplift assumptions. Three levers to move from "at target" to "comfortably above":
+We're at 1.64× at $200k ceiling — below the 2.0× target. This is the honest cost of ranging fully across the positive-EV population; the tuned model surfaces more marginal-EV users than defaults did. Three levers to close the gap or explicitly trade ROI for volume:
 
 1. **Measure real uplift via A/B test.** The 15% credit uplift is a 2024 pilot estimate; if the true value is 18–20%, we'd clear 2.0× cleanly. This is the highest-impact + lowest-effort change and is on the roadmap anyway (see Rollout plan below).
 2. **Tier-differentiated offers.** Basic gets cheaper interventions ($1 playlist), Premium gets richer ones ($12 upgrade). Shifts the EV distribution favorably per tier.
 3. **Stronger model.** Event-stream features are the biggest bet — playback completion rates, notification response, cross-device usage. Requires engineering investment on the data pipeline side, so this is a Q3 conversation, not a v1 dependency.
 
-**v2 preview (Phase 8, causal uplift model):** On the same experimental subset, a T-learner uplift model delivers 25× more *true* retained revenue than the propensity-based v1 by targeting per-user causal responsiveness rather than absolute risk. That work is queued as a follow-up once we have ~5× the current experimental sample. See [`notebooks/09_policy_comparison.py`](../notebooks/09_policy_comparison.py).
+**v2 preview (Phase 8, causal uplift model):** On the 5,050 users treated specifically with `credit_5` in the experiment, a T-learner uplift model delivers **~5.7× more true retained revenue** than the propensity-based v1 by targeting per-user causal responsiveness rather than absolute risk. Framed against a perfect-ranker oracle, **v1 captures 11% of the retained-revenue ceiling and v2 captures 63%** — v2 closes roughly six-sevenths of the gap that v1 leaves on the table. That work is queued as a follow-up once we have ~5× the current experimental sample. Caveats: (1) both models have training-set overlap with the evaluation subset (~80% for v1, ~14% for v2), so this is "each model at its best on shared users," not strictly held-out data; (2) real deployment should use a fresh randomized holdout for validation. See [`notebooks/09_policy_comparison.py`](../notebooks/09_policy_comparison.py) Sections D + G.
 
 ---
 
