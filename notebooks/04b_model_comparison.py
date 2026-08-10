@@ -429,9 +429,13 @@ LR is persisted as the documented baseline in `models/churn_model_v1.pkl`
 under the `baseline_model` key. `production_model` is calibrated HistGBM.
 
 The full run log is in mlflow.db -- compare in `mlflow ui` at localhost:5000.
-Ten runs land under experiment 'streamflix_churn': lr_baseline,
-hist_gbm_uncalibrated, hist_gbm_calibrated (Phase 4), lr_tuned,
-xgboost_default, hist_gbm, random_forest, xgboost_tuned, hist_gbm_tuned
-(Phase 4b), plus a Registry-registered version at
+Runs land under experiment 'streamflix_churn':
+  Phase 4  -> lr_baseline, hist_gbm_default, hist_gbm_tuned,
+              hist_gbm_{winner}_calibrated (winner chosen on TEST PR-AUC)
+  Phase 4b -> lr_tuned, xgboost_default, xgboost_tuned, hist_gbm,
+              hist_gbm_tuned, random_forest
+  Phase 8  -> uplift_s_learner, uplift_t_learner, uplift_x_learner,
+              uplift_class_transform
+Plus a Registry-registered version at
 models:/streamflix_churn_production@production.
 """)

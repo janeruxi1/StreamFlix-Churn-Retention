@@ -47,7 +47,21 @@
 import os
 import sys
 import pickle
+import warnings
 from pathlib import Path
+
+# Silence two harmless third-party warnings triggered by scikit-uplift's
+# import chain. They'll clear themselves when sklift releases a version
+# compatible with sklearn 1.8+ and modern ipywidgets. Not our code.
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    message="Function stable_cumsum is deprecated",
+)
+warnings.filterwarnings(
+    "ignore",
+    message=".*IProgress not found.*",
+)
 
 # Run from project root whether invoked as `python notebooks/08_...` or
 # from a Jupyter cell (which doesn't define __file__).

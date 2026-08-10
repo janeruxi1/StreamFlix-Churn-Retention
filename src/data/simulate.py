@@ -245,65 +245,49 @@ def simulate_subscribers(cfg: SimConfig = SimConfig()) -> pd.DataFrame:
     churned_next_30d = rng.binomial(1, churn_prob).astype(int)
 
     # ---- 8.5. Treatment assignment & counterfactual outcomes (uplift) ----
-    # Simulates a randomized retention experiment for Phase 8 uplift
-    # modeling. 50% of users receive a lever from the intervention menu;
-    # the other 50% are control. For each treated user we draw a
-    # counterfactual outcome under the assigned lever with per-user
-    # heterogeneity + a small sleeping-dogs segment.
+    # Simulates a SINGLE-ARM randomized retention experiment testing
+    # credit_5 vs control for Phase 8 uplift modeling. 50% of users get
+    # credit_5, the other 50% are control. Single-arm design (vs earlier
+    # multi-arm 5-lever design) maximizes statistical power for the one
+    # lever we causally validate. For each treated user we draw a
+    # counterfactual outcome with per-user heterogeneity + a small
+    # sleeping-dogs segment.
     #
     # Adds columns: treated, treatment_lever, churned_if_treated,
     # y_observed, true_uplift.
     # Backward compatible: churned_next_30d unchanged (still the pure
     # control potential outcome that Phase 4-6 train and score against).
 
-    # Base uplift (reduction in P(churn)) per lever, before heterogeneity
-    _LEVER_BASE_UPLIFT = {
-        "email_nudge":     0.03,
-        "credit_5":        0.10,
-        "credit_10":       0.15,
-        "content_push":    0.06,
-        "premium_upgrade": 0.18,
-    }
-    _LEVER_NAMES = np.array(list(_LEVER_BASE_UPLIFT.keys()))
+    # Base uplift (reduction in P(churn)) for credit_5, before heterogeneity
+    _CREDIT_5_BASE_UPLIFT = 0.10
 
-    # 50/50 treatment assignment
+    # 50/50 treatment assignment (single-arm: control vs credit_5)
     treated = (rng.random(n) < 0.5).astype(int)
 
     # ~5% sleeping dogs: treatment INCREASES their churn (they were about
     # to renew but the "we miss you" nudge reminds them to cancel).
     is_sleeping_dog = rng.random(n) < 0.05
 
-    # Uniform lever assignment for treated; "none" for control
-    lever_idx = rng.integers(0, len(_LEVER_NAMES), size=n)
-    treatment_lever = np.where(treated == 1, _LEVER_NAMES[lever_idx], "none")
+    # All treated users get credit_5; control users get "none"
+    treatment_lever = np.where(treated == 1, "credit_5", "none")
 
-    # Base uplift for the assigned lever
-    base_uplift = np.array(
-        [_LEVER_BASE_UPLIFT.get(l, 0.0) for l in treatment_lever]
-    )
+    # Base uplift for treated users (credit_5)
+    base_uplift = np.where(treated == 1, _CREDIT_5_BASE_UPLIFT, 0.0)
 
-    # Segment-based heterogeneity modulators (multiplicative)
+    # Segment-based heterogeneity modulators for credit_5 (multiplicative)
     mod = np.ones(n)
-    # Users with recent payment failures respond STRONGLY to credit levers
-    credit_mask = np.isin(treatment_lever, ["credit_5", "credit_10"])
-    mod[credit_mask & (payment_failures_30d > 0)] *= 1.6
-    # Casual users respond well to content pushes (haven't found things to watch)
-    mod[(treatment_lever == "content_push") & (cohort == "casual")] *= 1.5
-    # Heavy users don't need email nudges (already engaged)
-    mod[(treatment_lever == "email_nudge") & (cohort == "heavy")] *= 0.3
+    treated_mask = treated == 1
+    # Users with recent payment failures respond STRONGLY to credit_5
+    mod[treated_mask & (payment_failures_30d > 0)] *= 1.6
     # Trial-drop window (tenure=2) responds very well to a small credit
-    mod[(treatment_lever == "credit_5") & (tenure_months == 2)] *= 1.8
-    # Users with a soon-to-expire promo respond well to a bigger credit
-    mod[(treatment_lever == "credit_10")
-        & (days_until_promo_expires >= 0)
-        & (days_until_promo_expires <= 14)] *= 1.5
+    mod[treated_mask & (tenure_months == 2)] *= 1.8
 
-    # Sleeping dogs: any treatment BACKFIRES (negative uplift)
-    mod[is_sleeping_dog & (treated == 1)] = -0.6
+    # Sleeping dogs: credit_5 BACKFIRES (negative uplift)
+    mod[is_sleeping_dog & treated_mask] = -0.6
 
-    # True per-user uplift for the assigned lever
+    # True per-user uplift for credit_5
     # Convention: positive = churn REDUCTION (retention lift)
-    true_uplift = np.where(treated == 1, base_uplift * mod, 0.0)
+    true_uplift = base_uplift * mod
 
     # Counterfactual outcome: p_treated = clip(p_control - true_uplift)
     p_treated = np.clip(churn_prob - true_uplift, 0.001, 0.999)
