@@ -9,7 +9,7 @@
 # ---
 
 # %% [markdown]
-# # Phase 10 — Fairness & Segment Performance Audit
+# # Phase 5b — Fairness & Segment Performance Audit
 #
 # **Scope.** This notebook audits the **v1 model** (calibrated HistGradientBoosting
 # from Phase 4) and the **v1 policy** (cost-aware EV rule from Phase 6). The v2

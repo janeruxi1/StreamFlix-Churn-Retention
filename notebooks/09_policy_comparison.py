@@ -533,7 +533,8 @@ print("G. VERDICT + PHASE 9 SUMMARY")
 print("=" * 70)
 
 n_obs = int(observed.sum())
-v1_row, v2_row = rows[1], rows[2]
+v0_row, v1_row, v2_row = rows[0], rows[1], rows[2]
+v0_true = v0_row["true_retained"]
 
 # --- v2/v1 ratio (the retained-revenue multiplier the memo cites) ---
 v1_true = v1_row["true_retained"]
@@ -566,11 +567,23 @@ credit_5, already 5x the original multi-arm 5k-per-lever design).
 Head-to-head evidence on the {n_obs:,} observed treated users, same lever
 ({LEVER}), same budget cap (${BUDGET/1000:.0f}k):
 
-  Volume + revenue
+  Volume + revenue (against v0 = blanket m11 baseline)
+    v0 blanket  {v0_row['n_targeted_observed']:>6,} users -> ${v0_true:>10,.0f} true retained revenue
     v1 targets  {v1_row['n_targeted_observed']:>6,} users -> ${v1_true:>10,.0f} true retained revenue
     v2 targets  {v2_row['n_targeted_observed']:>6,} users -> ${v2_true:>10,.0f} true retained revenue
-    Delta       {v2_row['n_targeted_observed'] - v1_row['n_targeted_observed']:>+6,} users    {v2_true - v1_true:>+11,.0f}
-    Ratio       v2 delivers {ratio_str} the true retained revenue of v1
+
+  v0 -> v1 improvement (decision rule adds value on top of blanket):
+    Delta users:   {v1_row['n_targeted_observed'] - v0_row['n_targeted_observed']:>+7,}
+    Delta revenue: ${v1_true - v0_true:>+11,.0f}
+    Ratio:         v1 delivers {v1_true / max(v0_true, 1):.1f}x the true retained revenue of v0
+
+  v0 -> v2 improvement (uplift enhancement on top of blanket):
+    Delta users:   {v2_row['n_targeted_observed'] - v0_row['n_targeted_observed']:>+7,}
+    Delta revenue: ${v2_true - v0_true:>+11,.0f}
+    Ratio:         v2 delivers {v2_true / max(v0_true, 1):.1f}x the true retained revenue of v0
+
+  v1 -> v2 marginal step (adding causal uplift on top of the decision rule):
+    Ratio:         v2 delivers {ratio_str} the true retained revenue of v1
 
   Oracle ceiling (a perfect ranker with ground truth):
     Users a perfect policy would target: {int(oracle_mask.sum()):,}
