@@ -31,24 +31,30 @@ Metric framework: [`reports/metrics_framework.md`](./reports/metrics_framework.m
 
 ## 🎯 What This Project Demonstrates
 
-| Skill | Where it shows up |
-|---|---|
-| Business framing & metric design | `reports/scenario_brief.md`, `reports/metrics_framework.md` |
-| Synthetic dataset design with embedded ground truth | `src/data/simulate.py` |
-| Data audit & distribution checks | `notebooks/01_data_audit.py` |
-| Exploratory + survival analysis (KM, landmark analysis) | `notebooks/02_eda.py` |
-| Feature engineering with reusable transformers | `notebooks/03_feature_engineering.py`, `src/features/` |
-| Model training, calibration, and evaluation | `notebooks/04_modeling.py`, `src/models/` |
-| Model bake-off across 4 families + Optuna tuning | `notebooks/04b_model_comparison.py` |
-| Experiment tracking (MLflow) | `src/models/tracking.py`, `notebooks/04_modeling.py`, `04b_model_comparison.py`, `08_uplift_modeling.py` |
-| SHAP explainability framed as actionable retention levers | `notebooks/05_shap_levers.py` |
-| Cost-aware decision rule + ROI sweep *(v1 policy)* | `notebooks/06_decision_rule.py`, `src/decisions/` |
-| Stakeholder decision memo + hero figure *(v1 recommendation)* | `reports/decision_memo.md`, `notebooks/07_hero_figure.py` |
-| Interactive Streamlit decision-support app | `app/streamlit_app.py` |
-| Causal / uplift modeling — T/S/X-learners + Qini + decile lift *(v2)* | `notebooks/08_uplift_modeling.py`, `src/models/uplift.py` |
-| v1 vs v2 head-to-head against simulator ground truth | `notebooks/09_policy_comparison.py` |
-| Fairness / segment-parity audit (calibration + recall) | `notebooks/10_fairness_audit.py` |
-| Production code quality (tests, CI) | `src/`, `tests/`, `.github/workflows/` |
+The project is organized around three layers, each measured against the same **v0 blanket-campaign baseline**:
+
+- **Part 1 — churn model** (predicts P(churn) per user)
+- **Part 2 — cost-aware decision rule** (v1: churn model + LTV + assumed uplift per lever → EV rule vs v0)
+- **Part 3 — uplift enhancement** (v2: learned per-user causal uplift for `credit_5` → sharper targeting vs v0)
+
+| Part | Skill / capability | Where it shows up |
+|---|---|---|
+| — | Business framing & metric design | `reports/scenario_brief.md`, `reports/metrics_framework.md` |
+| — | Synthetic dataset design with embedded ground truth | `src/data/simulate.py` |
+| — | Data audit + distribution checks | `notebooks/01_data_audit.py` |
+| — | Exploratory + survival analysis (KM, landmark, sensitivity) | `notebooks/02_eda.py` |
+| — | Feature engineering with reusable transformers | `notebooks/03_feature_engineering.py`, `src/features/` |
+| **1** | Model training, calibration, and evaluation | `notebooks/04_modeling.py`, `src/models/` |
+| **1** | Model bake-off across 4 families + Optuna tuning | `notebooks/04b_model_comparison.py` |
+| **1** | Experiment tracking (MLflow) | `src/models/tracking.py` + notebooks 04, 04b, 08 |
+| **1** | SHAP explainability framed as actionable retention levers | `notebooks/05_shap_levers.py` |
+| **1** | Fairness / segment-parity audit (calibration + recall) | `notebooks/05b_fairness_audit.py` |
+| **2** | Cost-aware decision rule + ROI sweep — **v0 vs v1** | `notebooks/06_decision_rule.py`, `src/decisions/` |
+| **2** | Stakeholder decision memo + hero figure (v1 recommendation) | `reports/decision_memo.md`, `notebooks/07_hero_figure.py` |
+| **2** | Interactive Streamlit decision-support app | `app/streamlit_app.py` |
+| **3** | Causal / uplift modeling — S/T/X-learners + Qini + decile lift | `notebooks/08_uplift_modeling.py`, `src/models/uplift.py` |
+| **3** | Head-to-head — **v0 vs v2** (against simulator ground truth) | `notebooks/09_policy_comparison.py` |
+| — | Production code quality (tests, CI) | `src/`, `tests/`, `.github/workflows/` |
 
 ---
 
@@ -86,12 +92,12 @@ The two files share the same 50,000 rows; the experiment file adds five columns 
 │   ├── 03_feature_engineering.py / .ipynb  # Reusable feature transforms
 │   ├── 04_modeling.py / .ipynb          # LR baseline → HistGBM + calibration (v1 model)
 │   ├── 04b_model_comparison.py / .ipynb # 4-family bake-off + Optuna tuning (audit)
-│   ├── 05_shap_levers.py / .ipynb       # SHAP → actionable retention levers
-│   ├── 06_decision_rule.py / .ipynb     # Cost-aware policy + ROI sweep (v1 policy)
-│   ├── 07_hero_figure.py / .ipynb       # Builds reports/figures/07_hero_summary.png
-│   ├── 08_uplift_modeling.py / .ipynb   # v2: causal uplift (T/S/X-learner) + Qini
-│   ├── 09_policy_comparison.py / .ipynb # v1 vs v2 head-to-head vs ground truth
-│   └── 10_fairness_audit.py / .ipynb    # Segment performance + calibration parity
+│   ├── 05_shap_levers.py / .ipynb       # SHAP → actionable retention levers (Part 1)
+│   ├── 05b_fairness_audit.py / .ipynb   # Segment performance + calibration parity (Part 1 validation)
+│   ├── 06_decision_rule.py / .ipynb     # Cost-aware policy + ROI sweep (v1 policy — Part 2)
+│   ├── 07_hero_figure.py / .ipynb       # Builds reports/figures/07_hero_summary.png (Part 2)
+│   ├── 08_uplift_modeling.py / .ipynb   # v2: causal uplift (S/T/X-learner) + Qini (Part 3)
+│   └── 09_policy_comparison.py / .ipynb # v0 vs v1 vs v2 head-to-head vs ground truth (Part 3)
 ├── src/                             # Reusable, tested modules
 │   ├── data/
 │   │   ├── simulate.py              # Synthetic data generator
@@ -205,20 +211,34 @@ Run locally: `pytest tests/`
 
 ## 📚 Roadmap
 
-The project is built in 13 phases that mirror an end-to-end retention modeling workflow:
+The project is built in 13 phases, grouped into a three-part narrative:
+
+**Setup phases** (0-3) — brief, data, EDA, features:
 
 1. ✅ **Phase 0:** Project setup, PM brief, metric framework
 2. ✅ **Phase 1:** Synthetic dataset generator + data audit
 3. ✅ **Phase 2:** EDA + survival analysis (KM, landmark analysis, sensitivity)
 4. ✅ **Phase 3:** Feature engineering
+
+**Part 1: The churn model** — predict P(churn) per user, with interpretability + fairness:
+
 5. ✅ **Phase 4:** Modeling — LR baseline → HistGradientBoosting + calibration
 6. ✅ **Phase 4b:** Model comparison — 4-family bake-off + Optuna tuning + MLflow tracking
 7. ✅ **Phase 5:** SHAP — actionable retention levers
-8. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep *(v1 policy — propensity-based)*
-9. ✅ **Phase 7:** Decision memo + Streamlit decision-support app *(v1 recommendation)*
-10. ✅ **Phase 8:** Uplift (causal) modeling — T/S/X-learners + Qini AUC *(v2: per-user retention lift replaces the fixed-uplift constant)*
-11. ✅ **Phase 9:** Head-to-head — v1 (propensity) vs v2 (uplift) scored against the simulator's ground-truth `true_uplift`
-12. ✅ **Phase 10:** Fairness / segment-parity audit — PR-AUC + Brier + calibration + recall parity across plan tier, tenure bucket, engagement cohort, country
+8. ✅ **Phase 5b:** Fairness / segment-parity audit — PR-AUC + Brier + calibration + recall parity across plan tier, tenure bucket, engagement cohort, country
+
+**Part 2: Decision rule** — turn P(churn) into targeting decisions; compare **v0 vs v1**:
+
+9. ✅ **Phase 6:** Cost-aware decision rule + ROI sweep (v1 policy — churn model + assumed uplift per lever)
+10. ✅ **Phase 7:** Hero figure + decision memo + Streamlit decision-support app (v1 recommendation)
+
+**Part 3: Uplift enhancement** — add per-user learned uplift for credit_5; compare **v0 vs v2**:
+
+11. ✅ **Phase 8:** Uplift (causal) modeling — S/T/X-learners + Qini AUC (v2: per-user retention lift replaces the fixed-uplift constant)
+12. ✅ **Phase 9:** Head-to-head — v0 blanket vs v2 uplift-based scored against the simulator's ground-truth `true_uplift`
+
+**Delivery:**
+
 13. ✅ **Phase 11:** Production polish (86 unit tests, GitHub Actions CI, MIT license)
 
 ---

@@ -8,11 +8,17 @@
 
 ## TL;DR
 
-The current blanket $5 credit campaign at tenure month 11 is running at an estimated **$4.8k monthly loss** — $7.9k spent to retain $3.1k in expected revenue. The proposed cost-aware targeting policy delivers **+$19.1k net expected value per month** at ~4× the blanket spend but 7× the targeting volume. Net swing: **+$23.9k/month**.
+**Recommendation: ship v1 (churn-model-driven targeting). Sunset the blanket v0 campaign. Queue v2 (causal uplift) for validation via a production A/B holdout.**
 
-**Recommendation: ship the targeted policy as v1. Sunset the blanket campaign.**
+This project delivers a retention tool in three layers, each measured against the same v0 blanket baseline:
 
-Targeted policy ROI comes in at 1.64× at the $200k governance ceiling — below the 2.0× threshold set at kickoff. This is the honest read of the trade-off: Phase 4's Optuna-tuned HistGBM surfaces more borderline positive-EV users than defaults did, which raises **total net EV** (from $17.7k → $19.1k) but pulls **ROI** down as the target set widens with users near the EV=0 boundary. Section G's budget sweep shows ROI clears 2.0× only at very small budgets (~$5k → 2.24× ROI, but only $6.2k EV). The recommended $30k operating budget maximizes total absolute impact; ROI-first stakeholders can pick a lower point on the same curve. Sensitivity holds across ±50% uplift assumptions and across 12–60 month LTV horizons (Phase 6 Sections H and H.5) — the targeted policy beats the blanket in every scenario tested.
+- **v0 baseline (status quo):** $5 credit to every m11 subscriber. Costs $7.9k, retains $3.1k, **loses $4.8k/month**.
+- **v1 shipping (Part 2 output):** churn model + cost-aware EV rule across 3 tactical levers. Retains **$19.1k/month at 1.64× ROI**, a **$23.9k monthly swing vs v0**.
+- **v2 enhancement (Part 3 output):** adds causal uplift model for the `credit_5` lever specifically. On the ground-truth credit_5-treated subset, delivers **~21.9× more true retained revenue than v0** by catching persuadables v0 (and v1) miss. Not yet shipped — gated on production A/B validation.
+
+Three-part story: **Part 1** builds the churn model; **Part 2** applies a cost-aware decision rule to that model to beat v0; **Part 3** adds causal uplift to beat v0 by even more on the one lever we've experimentally validated.
+
+**On the ROI target.** v1's 1.64× is below the 2.0× threshold set at kickoff. Uplift alone can't close that gap at the $200k ceiling — the sensitivity sweep shows ROI plateaus at 1.80× even at +50% assumed uplift, because more uplift means more marginal-EV users get targeted (Section H). The CFO can pick a smaller operating budget ($7.5k → 2.06× ROI at $7.9k EV) if hitting 2.0× is a hard constraint, or accept 1.64× at $30k for max total impact. Both options are on the page.
 
 ---
 
@@ -30,7 +36,28 @@ The blanket approach fails because most m11 users weren't going to churn anyway.
 
 ---
 
-## Recommendation
+## Part 1: The churn model
+
+**What it does.** For every subscriber in the base, predict `P(churn | user)` over the next 30 days. This is the raw material Part 2's decision rule turns into targeting decisions.
+
+**Model choice.** A calibrated `HistGradientBoostingClassifier` (Optuna-tuned when tuning holds up on the held-out test set). Chosen via Phase 4b's family bake-off across LR, XGBoost, HistGBM, and Random Forest — HistGBM won on PR-AUC among tree models and drops the external `xgboost` dependency (sklearn-only). Calibrated with Platt (monotonic sigmoid) so the decision rule in Part 2 can multiply P(churn) × LTV without systematic bias.
+
+**Model quality.**
+
+| Metric | Value | Interpretation |
+|---|---:|---|
+| PR-AUC | **0.20** | Primary metric for imbalanced (~5% positive) classes |
+| ROC-AUC | 0.77 | Comparable to published benchmarks in subscription churn |
+| Top-10% lift | **3.8×** | The 5,000 users flagged as highest-risk contain 38% of all real churners |
+| Brier score | 0.047 | Well-calibrated at the current base rate |
+
+**Interpretability + fairness.** Phase 5 (SHAP) explains WHY each user is flagged, with a two-layer diagnostic → tactical crosswalk (see below). Phase 5b's fairness audit surfaced a modest calibration gap on the casual-engagement cohort and no under-service violations across plan tier, country, or tenure bucket.
+
+**Output for Part 2.** Per-user `P(churn)` + per-user top SHAP driver + a documented feature→tactical-lever crosswalk.
+
+---
+
+## Part 2: Decision rule (v1 — what we ship)
 
 Replace the blanket campaign with a **cost-aware targeting policy** built on three components:
 
@@ -104,9 +131,7 @@ Reading this: *the top 5% of the base — the 500 users the model flags as highe
 
 This is the mechanic that makes the ROI story work — most m11 users the blanket targets aren't going to churn, and the model can tell which few actually might.
 
----
-
-## Risks & assumptions
+### Risks & assumptions (v1)
 
 **Uplift is a PM assumption, not a measurement.** The 5%/15%/25% uplift figures for the three levers come from the 2024 pilot summary. We ran a sensitivity sweep across ±50%:
 
@@ -141,9 +166,58 @@ Two useful reads on this:
 
 **Why 24 months and not longer?** Phase 6 Section H.5 walks through the trade-off: at 36/48/60-month horizons, LTV and net EV both grow substantially on paper, but each additional year is estimated from a smaller, more survivor-biased sub-population (only ~30% of subscribers are observed to 24 months, ~15% to 36, ~5% to 48, ~1% to 60). 24 months is the point where the KM sample is large enough to trust and the anniversary churn spike at m12 is fully captured. Longer horizons inflate LTV based on the retention-selected tail; shorter horizons under-value the anniversary window. The sensitivity table is on the page — not hidden — so this choice can be revisited by finance if the risk tolerance is different.
 
+### Path to higher ROI (v1)
+
+At $200k ceiling we sit at 1.64×, below the 2.0× target set at kickoff. Sensitivity analysis (Phase 6 Section H) shows that **higher uplift alone won't get us to 2.0× at this budget** — even at 1.5× the assumed uplift (22.5% for credit_5), ROI plateaus at 1.80×, because more uplift means more marginal-EV users get targeted, not just more revenue per targeted user. Four honest options for closing the gap, in order of quickness × impact:
+
+1. **Cap the operating budget lower.** Section G's sweep shows ROI clears 2.0× at budgets ≤ $7.5k (2.06× ROI / $7.9k EV) or ≤ $5k (2.24× ROI / $6.2k EV). Trades total impact for per-dollar efficiency. Zero engineering effort — pick a different point on the same curve.
+2. **Measure real uplift via A/B test.** The 15% credit uplift is a 2024 pilot estimate; if the true value is meaningfully higher (~30%+), ROI at $200k could clear 2.0×. Also the natural next step in the rollout plan below. Uplift alone probably isn't enough, though — it needs to combine with the model improvements below. Part 3 (v2) tackles this directly by replacing the assumption with a learned per-user value.
+3. **Tier-differentiated offers.** Basic gets cheaper interventions ($1 playlist), Premium gets richer ones ($12 upgrade). Shifts the EV distribution favorably per tier — modest impact, low effort.
+4. **Stronger model.** Event-stream features are the biggest structural bet — playback completion rates, notification response, cross-device usage. Better model discrimination narrows the positive-EV set to genuinely high-EV users, raising average per-user EV and lifting ROI without shrinking impact. Requires engineering investment on the data pipeline side — Q3 conversation, not a v1 dependency.
+
+**Honest read for the CFO:** 2.0× at $200k isn't reachable at v1 quality. Pick one: (a) accept a smaller operating budget (~$7.5k) to hit the target ROI at the cost of total impact, or (b) accept 1.64× at $30k for maximum total EV while the model + measurement roadmap catches up.
+
+---
+
+## Part 3: Uplift enhancement (v2 — future work)
+
+**What it does.** v1's decision rule multiplies P(churn) by an **assumed** uplift per lever (5% / 15% / 25%). v2 replaces that assumption for the `credit_5` lever specifically with a **learned per-user retention lift** from a randomized A/B experiment — the causal treatment effect P(churn | control) − P(churn | treated). Same downstream decision rule, better input.
+
+**Why:** two users can have identical P(churn) but very different responsiveness to credit_5. v1 targets by "who's likely to churn"; v2 targets by "who will actually respond to $5 credit." This finds the *persuadable middle* — moderate-churn-risk users with high causal responsiveness — that v1's high-risk-first threshold filters out.
+
+**Scope.** The uplift model covers `credit_5` only. The other two Phase 6 tactical levers (`curated_playlist`, `premium_upgrade`) still use v1's assumed-uplift approach. Extending to all three levers would require a multi-arm experiment — see the "Data design" section.
+
+### v0 → v2 headline (on the credit_5-treated ground-truth subset)
+
+Evaluated on ~25,000 users who actually received `credit_5` in the single-arm experiment (the ones with observed ground-truth uplift):
+
+| Policy | Users targeted | True retained revenue | vs v0 |
+|---|---:|---:|---:|
+| **v0** (blanket m11 on credit_5 only) | 784 | $21,180 | — |
+| **v2** (uplift-based) | 14,969 | **$463,242** | **~21.9×** |
+
+Framed against a perfect-ranker oracle ($752,420 ceiling):
+
+- **v0 captures ~3% of the ceiling**
+- **v2 captures ~62% of the ceiling**
+- v2 closes roughly six-sevenths of the gap v0 leaves on the table.
+
+The 21.9× ratio is the answer to *"how much more retained revenue would we deliver if we replaced blanket with the full v2 stack?"* Note this is a ground-truth measurement (against the simulator's `true_uplift` column) — different from the v0-vs-v1 numbers in Part 2, which come from the model's own expected-value calculation on the full 50k base.
+
+### Status + caveats
+
+**Not yet shipped.** v2 is queued as a follow-up once validated against a fresh production randomized holdout. Two caveats a stakeholder should know:
+
+- **Training-set overlap.** Both models have some in-sample presence in the evaluation subset (~80% for v1, ~14% for v2), so the head-to-head is "each model at its best on shared users," not strictly held-out data. Real deployment should use a fresh A/B holdout for validation.
+- **Sleeping-dog identification is at random baseline.** Both v1 and v2 target sleeping dogs (users the treatment HURTS) at ~5%, matching the population base rate. v2 catches persuadables well but can't yet sharply avoid sleeping dogs — that's the specific weakness a production A/B holdout would tighten.
+
+See [`notebooks/09_policy_comparison.py`](../notebooks/09_policy_comparison.py) Sections D + G for the full head-to-head including the v1 middle step (v2 delivers ~5.5× the true retained revenue of v1 on the same subset).
+
 ---
 
 ## Rollout plan
+
+Applies to v1 shipping now, with v2 gated on the same experimental infrastructure catching up.
 
 **Week 1–2** — Ship v1 in shadow mode. Score every subscriber daily; log the recommended lever and P(churn) but don't send any interventions. Retention team runs the blanket campaign as usual. Compare recommendations against blanket targets to build stakeholder confidence.
 
@@ -151,22 +225,7 @@ Two useful reads on this:
 
 **Week 5–6** — Read out results. If targeted arm shows lower churn AND lower cost, ramp to 100%.
 
-**Ongoing** — Per-lever A/B tests to measure true uplift. Retrain the model quarterly.
-
----
-
-## Path to higher ROI
-
-At $200k ceiling we sit at 1.64×, below the 2.0× target set at kickoff. Sensitivity analysis (Section H) shows that **higher uplift alone won't get us to 2.0× at this budget** — even at 1.5× the assumed uplift (22.5% for credit_5), ROI plateaus at 1.80×, because more uplift means more marginal-EV users get targeted, not just more revenue per targeted user. Four honest options for closing the gap, in order of quickness × impact:
-
-1. **Cap the operating budget lower.** Section G's sweep shows ROI clears 2.0× at budgets ≤ $7.5k (2.06× ROI / $7.9k EV) or ≤ $5k (2.24× ROI / $6.2k EV). Trades total impact for per-dollar efficiency. Zero engineering effort — pick a different point on the same curve.
-2. **Measure real uplift via A/B test.** The 15% credit uplift is a 2024 pilot estimate; if the true value is meaningfully higher (~30%+), ROI at $200k could clear 2.0×. Also the natural next step in the rollout plan below. Uplift alone probably isn't enough, though — it needs to combine with the model improvements below.
-3. **Tier-differentiated offers.** Basic gets cheaper interventions ($1 playlist), Premium gets richer ones ($12 upgrade). Shifts the EV distribution favorably per tier — modest impact, low effort.
-4. **Stronger model.** Event-stream features are the biggest structural bet — playback completion rates, notification response, cross-device usage. Better model discrimination narrows the positive-EV set to genuinely high-EV users, raising average per-user EV and lifting ROI without shrinking impact. Requires engineering investment on the data pipeline side — Q3 conversation, not a v1 dependency.
-
-**Honest read for the CFO:** 2.0× at $200k isn't reachable at v1 quality. Pick one: (a) accept a smaller operating budget (~$7.5k) to hit the target ROI at the cost of total impact, or (b) accept 1.64× at $30k for maximum total EV while the model + measurement roadmap catches up.
-
-**v2 preview (Phase 8, causal uplift model):** On the ~25,000 users treated with `credit_5` in the single-arm experiment, an S-learner uplift model delivers **~5.5× more true retained revenue** than the propensity-based v1 (~$463k vs ~$84k) by targeting per-user causal responsiveness rather than absolute risk. Framed against a perfect-ranker oracle ($752k ceiling), **v1 captures ~11% of the retained-revenue ceiling and v2 captures ~62%** — v2 closes roughly six-sevenths of the gap that v1 leaves on the table. Precision is similar for both (~95% persuadable-hit rate); the difference is v2's volume — it correctly identifies the *persuadable middle* v1's high-risk-only rule filters out. That work is queued as a follow-up once validated against a fresh production randomized holdout. Caveats: (1) both models have training-set overlap with the evaluation subset (~80% for v1, ~14% for v2), so this is "each model at its best on shared users," not strictly held-out data; (2) sleeping-dog identification is still at random-baseline (~5% rate for both v1 and v2 vs 5% population base rate) — v2 catches persuadables well but can't yet sharply avoid sleeping dogs. See [`notebooks/09_policy_comparison.py`](../notebooks/09_policy_comparison.py) Sections D + G.
+**Ongoing** — Per-lever A/B tests to measure true uplift (feeds Part 3's v2 validation). Retrain the model quarterly.
 
 ---
 
