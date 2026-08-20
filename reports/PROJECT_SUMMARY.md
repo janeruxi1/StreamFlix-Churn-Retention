@@ -1,6 +1,6 @@
 # Project Summary — StreamFlix Churn Retention
 
-**What was built + what was found.** Single entry-point catalog for reviewers, hiring managers, and future-me. Every number here is verified against the notebook output (see the `verify_memo.py`-style sanity check in `reports/decision_memo.md`'s "verification pass" audit).
+**What was built + what was found.** Single-page catalog of the project's components and headline results. Every number here is verified against the notebook output (see the `verify_memo.py`-style sanity check in `reports/decision_memo.md`'s "verification pass" audit).
 
 ---
 
