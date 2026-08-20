@@ -12,6 +12,8 @@
 
 **Bottom line:** the current blanket $5 credit campaign runs a $4.8k monthly loss. The targeted policy delivers **+$19.1k net expected value** at 1.64× ROI — a **$23.9k monthly swing**. Full analysis in [`notebooks/06_decision_rule.ipynb`](./notebooks/06_decision_rule.ipynb); recommendation in [`reports/decision_memo.md`](./reports/decision_memo.md).
 
+**Fastest way in:** [`reports/PROJECT_SUMMARY.md`](./reports/PROJECT_SUMMARY.md) — single-page catalog of what was built + what was found across the three-part structure (churn model → decision rule → uplift enhancement), with every headline number traced to its source notebook.
+
 ---
 
 ## 📌 Business Problem
