@@ -173,7 +173,7 @@ Both v1 and v2 target sleeping dogs (users where treatment INCREASES churn) at ~
 ## Key design decisions + rationale
 
 **Why HistGradientBoosting for production (not XGBoost or LR):**
-Phase 4b bake-off showed HistGBM beats XGBoost on PR-AUC. Tuned LR ties it on the aggregate metric but lacks tree-model production properties (SHAP richness, missing-value handling, noise tolerance). HistGBM drops the external `xgboost` dependency (sklearn-only). See `reports/prep/phase_4_qa.md` for the full argument.
+Phase 4b bake-off showed HistGBM beats XGBoost on PR-AUC. Tuned LR ties it on the aggregate metric but lacks tree-model production properties (SHAP richness, missing-value handling, noise tolerance). HistGBM drops the external `xgboost` dependency (sklearn-only). The bake-off itself is in `notebooks/04b_model_comparison.py`.
 
 **Why single-arm experiment (not multi-arm):**
 Original design was 5 levers × 5k treated each = fragmented statistical power per lever. Single-arm gives 25k credit_5-treated users — 5× more training data, 5× more ground-truth evaluation. Trade-off: no ground truth for other levers; v1.1 multi-lever uplift would need a new experiment.
@@ -201,8 +201,6 @@ The kickoff metric framework set 2.0× ROI as the ship bar. v1 delivers 1.64× a
 - **2.0× ROI target not achieved at $200k.** ROI plateaus at 1.80× even with 50% stronger assumed uplift — need stronger model, not just better assumptions.
 - **PR-AUC 0.18 is modest.** Tabular snapshots cap what any model can extract; event-stream features are the biggest headroom.
 
-See `reports/prep/future_improvements.md` for the full ranked improvement plan.
-
 ---
 
 ## Where to find each artifact
@@ -217,7 +215,6 @@ See `reports/prep/future_improvements.md` for the full ranked improvement plan.
 | Interactive tool | `streamlit run app/streamlit_app.py` |
 | Metric framework (kickoff) | `reports/metrics_framework.md` |
 | Original PM brief | `reports/scenario_brief.md` |
-| Interview prep pack (12 files) | `reports/prep/` |
 | Tests | `tests/` — 88 pytest, GitHub Actions CI with a lint step |
 | Simulator | `src/data/simulate.py` |
 | Decision-rule math | `src/decisions/policy.py` |
