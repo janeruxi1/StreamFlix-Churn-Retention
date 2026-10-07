@@ -389,7 +389,7 @@ def main(
 
     print(f"\nMean tickets per user (90d): {df['support_tickets_90d'].mean():.3f}")
     print(f"Mean tickets per user (7d):  {df['support_tickets_7d'].mean():.3f}")
-    print(f"7d should be ~ 90d / 13 (proportional time)")
+    print("7d should be ~ 90d / 13 (proportional time)")
 
     print(f"\nMean payment failures per user (180d): {df['payment_failures_180d'].mean():.3f}")
     print(f"Mean payment failures per user (30d):  {df['payment_failures_30d'].mean():.3f}")
@@ -399,10 +399,10 @@ def main(
     print(f"Users with active promo: {df['promo_active'].mean():.1%}")
 
     # Treatment experiment stats (Phase 8)
-    print(f"\nTreatment/control (Phase 8 uplift experiment):")
+    print("\nTreatment/control (Phase 8 uplift experiment):")
     print(f"  Treated:   {df['treated'].mean():.1%}")
     print(f"  Control:   {(1 - df['treated']).mean():.1%}")
-    print(f"  Lever mix (treated only):")
+    print("  Lever mix (treated only):")
     for lever, count in df[df["treated"] == 1]["treatment_lever"].value_counts().items():
         print(f"    {lever:<18}  n={count:>5,}  ({count / (df['treated'] == 1).sum():.1%})")
     print(f"  Mean true uplift (treated): "

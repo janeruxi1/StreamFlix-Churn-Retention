@@ -1,9 +1,9 @@
 """Model evaluation metric tests."""
 import numpy as np
-import pytest
 
 from src.models.evaluate import (
     compute_metrics, top_k_metrics, calibration_curve_points,
+    bootstrap_metric_ci,
 )
 
 
@@ -63,3 +63,24 @@ def test_calibration_curve_perfect_model_hugs_diagonal():
     # For a perfect model, mean_pred and frac_positive should be within 0.05
     diffs = np.abs(curve["mean_pred"] - curve["frac_positive"])
     assert diffs.max() < 0.05, f"max calibration gap = {diffs.max():.3f}"
+
+
+def test_bootstrap_ci_brackets_estimate_and_is_reproducible():
+    rng = np.random.default_rng(0)
+    y_true = rng.binomial(1, 0.1, 2000)
+    y_proba = np.clip(0.1 + 0.3 * y_true + rng.normal(0, 0.15, 2000), 0, 1)
+    a = bootstrap_metric_ci(y_true, y_proba, n_boot=200, seed=1)
+    b = bootstrap_metric_ci(y_true, y_proba, n_boot=200, seed=1)
+    assert a == b
+    assert a["ci_low"] <= a["estimate"] <= a["ci_high"]
+    assert a["ci_high"] - a["ci_low"] > 0
+
+
+def test_bootstrap_ci_narrows_with_more_data():
+    rng = np.random.default_rng(0)
+    def width(n):
+        y = rng.binomial(1, 0.1, n)
+        p = np.clip(0.1 + 0.3 * y + rng.normal(0, 0.15, n), 0, 1)
+        r = bootstrap_metric_ci(y, p, n_boot=200)
+        return r["ci_high"] - r["ci_low"]
+    assert width(10000) < width(500)

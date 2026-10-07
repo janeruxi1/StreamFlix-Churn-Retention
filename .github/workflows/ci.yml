@@ -30,7 +30,10 @@ jobs:
           # test suite; they're covered by the notebooks locally.
           # scikit-uplift IS required: test_uplift.py imports src.models.uplift
           # which hard-imports sklift at module load time.
-          pip install pandas numpy scipy scikit-learn xgboost scikit-uplift pytest
+          pip install pandas numpy scipy scikit-learn xgboost scikit-uplift pytest ruff
+
+      - name: Lint (ruff)
+        run: ruff check src tests scripts
 
       - name: Run tests
         run: pytest tests/ -v --tb=short

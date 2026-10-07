@@ -46,9 +46,9 @@ The blanket approach fails because most m11 users weren't going to churn anyway.
 
 | Metric | Value | Interpretation |
 |---|---:|---|
-| PR-AUC | **0.20** | Primary metric for imbalanced (~5% positive) classes |
-| ROC-AUC | 0.77 | Comparable to published benchmarks in subscription churn |
-| Top-10% lift | **3.8×** | The 5,000 users flagged as highest-risk contain 38% of all real churners |
+| PR-AUC | **0.18** | Primary metric for imbalanced (~5% positive) classes |
+| ROC-AUC | 0.75 | Comparable to published benchmarks in subscription churn |
+| Top-10% lift | **3.6×** | The 5,000 users flagged as highest-risk contain 36% of all real churners |
 | Brier score | 0.047 | Well-calibrated at the current base rate |
 
 **Interpretability + fairness.** Phase 5 (SHAP) explains WHY each user is flagged, with a two-layer diagnostic → tactical crosswalk (see below). Phase 5b's fairness audit surfaced a modest calibration gap on the casual-engagement cohort and no under-service violations across plan tier, country, or tenure bucket.
@@ -121,11 +121,11 @@ The reason cost-aware targeting beats the blanket is simple: the calibrated mode
 
 | Target | Users contacted (per 10k base) | True churners caught | Share of all churners | **Lift vs random** |
 |---|---|---|---|---|
-| Top **5%** | 500 | 131 | 24.6% | **4.9×** |
-| Top **10%** | 1,000 | 205 | 38.4% | **3.8×** |
-| Top **20%** | 2,000 | 297 | 55.7% | **2.8×** |
+| Top **5%** | 500 | 124 | 23.2% | **4.6×** |
+| Top **10%** | 1,000 | 190 | 35.6% | **3.6×** |
+| Top **20%** | 2,000 | 287 | 53.7% | **2.7×** |
 
-Reading this: *the top 5% of the base — the 500 users the model flags as highest-risk — contains 25% of all real churners.* If we contacted only those 500 users we'd catch 4.9× more churners than sending 500 random credits.
+Reading this: *the top 5% of the base — the 500 users the model flags as highest-risk — contains 23% of all real churners.* If we contacted only those 500 users we'd catch 4.6× more churners than sending 500 random credits.
 
 ![Lift chart](figures/04_lift_chart.png)
 
@@ -141,7 +141,7 @@ This is the mechanic that makes the ROI story work — most m11 users the blanke
 
 **ROI is monotone-increasing in uplift** across the sensitivity range (no interior peak), but plateaus around 1.80× at 1.5× uplift because the policy target set grows to catch marginal-EV users as uplift increases. The recommendation direction holds across all reasonable uplift assumptions — targeted always beats blanket. But an A/B test per lever in production is the natural next step to nail down real numbers.
 
-**Model discrimination is modest.** PR-AUC = 0.20, ROC-AUC = 0.77, top-10% lift = 3.8× (see the lift chart above — steep decay from 3.8× at the top decile to 1.0× at the bottom, monotonic throughout, which is what a healthy ranking model looks like). The synthetic training data has no unmeasured interactions that a real production dataset would provide. In practice, we'd expect the model to improve as event-stream features (browsing, video-completion rates, notification opens) come online.
+**Model discrimination is modest.** PR-AUC = 0.18 (bootstrap 95% interval roughly 0.14–0.20, see [`metric_confidence_intervals.md`](metric_confidence_intervals.md)), ROC-AUC = 0.75, top-10% lift = 3.6× (see the lift chart above — steep decay from 3.6× at the top decile to 1.0× at the bottom, monotonic throughout, which is what a healthy ranking model looks like). The synthetic training data has no unmeasured interactions that a real production dataset would provide. In practice, we'd expect the model to improve as event-stream features (browsing, video-completion rates, notification opens) come online.
 
 **Budget doesn't currently bind — and that's a deliberate distinction between operating budget and governance ceiling.** ~22% of subscribers have some positive-EV lever, but the policy naturally saturates at ~$30k of spend (~11k users) — beyond that point there are no more positive-EV users to target. So the full spend is $30k — far below the $200k governance ceiling. The budget-vs-ROI curve from the sweep in Phase 6 tells the story:
 

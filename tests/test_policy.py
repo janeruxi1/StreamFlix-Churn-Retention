@@ -4,8 +4,7 @@ import pandas as pd
 import pytest
 
 from src.decisions.policy import (
-    INTERVENTION_MENU, LTV_BY_TIER, PREMIUM_UPGRADE_CAP_PCT,
-    expected_value, score_all_levers, pick_best_lever,
+    INTERVENTION_MENU, expected_value, score_all_levers, pick_best_lever,
     apply_budget_cap, apply_premium_cap, summarize_policy,
     simulate_blanket_campaign,
 )

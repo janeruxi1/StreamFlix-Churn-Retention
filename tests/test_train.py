@@ -1,7 +1,6 @@
 """Model training utility tests. Kept lightweight -- no actual XGBoost training."""
 import numpy as np
 import pandas as pd
-import pytest
 
 from src.models.train import prepare_features, DROP_COLS, BOOLEAN_COLS
 

@@ -18,12 +18,14 @@ Decision:
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict
 
 import numpy as np
 import pandas as pd
 
-from src.decisions.ltv import LTV_BY_TIER   # KM-derived; see src/decisions/ltv.py
+# Re-exported on purpose: app/streamlit_app.py and notebooks 05 and 08
+# import LTV_BY_TIER from this module. Removing it breaks the live demo.
+from src.decisions.ltv import LTV_BY_TIER  # noqa: F401
 
 
 # ---------------------------------------------------------------------
@@ -143,7 +145,6 @@ def apply_premium_cap(policy: pd.DataFrame,
         return out
 
     premium_sorted = out[premium_mask].sort_values("best_ev", ascending=False)
-    keep_idx = premium_sorted.head(max_premium).index
     drop_idx = premium_sorted.iloc[max_premium:].index
 
     # For dropped users, re-target with cheaper lever (credit_5) if EV > 0
@@ -220,14 +221,13 @@ def pick_best_lever_uplift(uplift_by_lever: Dict[str, np.ndarray],
     Returns:
         DataFrame with columns best_lever, best_ev, cost.
     """
-    n = len(ltv)
     lever_names = list(uplift_by_lever.keys())
     if not lever_names:
         raise ValueError("uplift_by_lever must contain at least one lever")
 
     ev_matrix = np.column_stack([
-        uplift_by_lever[l] * ltv - menu[l]["cost"]
-        for l in lever_names
+        uplift_by_lever[name] * ltv - menu[name]["cost"]
+        for name in lever_names
     ])
     max_idx = ev_matrix.argmax(axis=1)
     max_ev = ev_matrix.max(axis=1)

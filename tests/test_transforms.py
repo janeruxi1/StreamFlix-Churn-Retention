@@ -1,13 +1,9 @@
 """Feature engineering transforms -- idempotency, shapes, and value ranges."""
-import numpy as np
 import pandas as pd
-import pytest
 
 from src.features.transforms import (
     build_features, ENGINEERED_COLUMNS,
-    add_engagement_features, add_tenure_features,
-    add_recency_features, add_lifecycle_features,
-    add_composite_features,
+    add_engagement_features,
 )
 
 
