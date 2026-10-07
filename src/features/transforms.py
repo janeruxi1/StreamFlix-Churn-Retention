@@ -190,7 +190,7 @@ def add_composite_features(df: pd.DataFrame) -> pd.DataFrame:
     out["payment_health_score"] = (
         (out["payment_method"] == "gift_card").astype(int) +
         2 * (out["payment_failures_30d"] > 0).astype(int) +
-        (out["auto_renew"] == False).astype(int)
+        (~out["auto_renew"].astype(bool)).astype(int)
     )
 
     # Lifecycle-event burden: count of currently-active risk windows

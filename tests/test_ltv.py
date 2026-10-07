@@ -4,8 +4,6 @@ If the hardcoded LTV_BY_TIER constants in ltv.py drift from what the KM
 derivation actually produces on the current dataset, these tests fail.
 """
 import numpy as np
-import pandas as pd
-import pytest
 
 from src.decisions.ltv import (
     LTV_BY_TIER, MONTHLY_REVENUE_BY_TIER, RMST_HORIZON_MONTHS,

@@ -37,6 +37,35 @@ def compute_metrics(y_true, y_proba) -> Dict[str, float]:
     }
 
 
+def bootstrap_metric_ci(y_true, y_proba, metric_fn=average_precision_score,
+                        n_boot: int = 1000, alpha: float = 0.05,
+                        seed: int = 42) -> Dict[str, float]:
+    """Percentile-bootstrap confidence interval for a ranking metric.
+
+    Resamples (y_true, y_proba) pairs with replacement and recomputes
+    `metric_fn` each time. Resamples containing a single class are
+    skipped (the metric is undefined there). Returns the point estimate,
+    the (1 - alpha) interval, and the number of valid resamples.
+    """
+    y_true = np.asarray(y_true)
+    y_proba = np.asarray(y_proba)
+    n = len(y_true)
+    rng = np.random.default_rng(seed)
+    stats = []
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        if y_true[idx].min() == y_true[idx].max():
+            continue
+        stats.append(metric_fn(y_true[idx], y_proba[idx]))
+    lo, hi = np.quantile(stats, [alpha / 2, 1 - alpha / 2])
+    return {
+        "estimate": float(metric_fn(y_true, y_proba)),
+        "ci_low": float(lo),
+        "ci_high": float(hi),
+        "n_boot_valid": len(stats),
+    }
+
+
 def top_k_metrics(y_true, y_proba, k: float = 0.10) -> Dict[str, float]:
     """Precision and recall when targeting the top-K fraction by probability.
 
