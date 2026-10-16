@@ -245,9 +245,9 @@ def simulate_subscribers(cfg: SimConfig = SimConfig()) -> pd.DataFrame:
     churned_next_30d = rng.binomial(1, churn_prob).astype(int)
 
     # ---- 8.5. Treatment assignment & counterfactual outcomes (uplift) ----
-    # Simulates a SINGLE-ARM randomized retention experiment testing
+    # Simulates a two-arm randomized retention experiment testing
     # credit_5 vs control for Phase 8 uplift modeling. 50% of users get
-    # credit_5, the other 50% are control. Single-arm design (vs earlier
+    # credit_5, the other 50% are control. One treatment lever (vs earlier
     # multi-arm 5-lever design) maximizes statistical power for the one
     # lever we causally validate. For each treated user we draw a
     # counterfactual outcome with per-user heterogeneity + a small
@@ -258,10 +258,12 @@ def simulate_subscribers(cfg: SimConfig = SimConfig()) -> pd.DataFrame:
     # Backward compatible: churned_next_30d unchanged (still the pure
     # control potential outcome that Phase 4-6 train and score against).
 
-    # Base uplift (reduction in P(churn)) for credit_5, before heterogeneity
-    _CREDIT_5_BASE_UPLIFT = 0.10
+    # credit_5 retains a SHARE of would-be churners: p_treated =
+    # p_control x (1 - relative_effect). The base share is 15%, the same
+    # figure the Phase 6 policy assumes, before heterogeneity.
+    _CREDIT_5_BASE_RELATIVE_EFFECT = 0.15
 
-    # 50/50 treatment assignment (single-arm: control vs credit_5)
+    # 50/50 treatment assignment (control vs credit_5)
     treated = (rng.random(n) < 0.5).astype(int)
 
     # ~5% sleeping dogs: treatment INCREASES their churn (they were about
@@ -271,26 +273,22 @@ def simulate_subscribers(cfg: SimConfig = SimConfig()) -> pd.DataFrame:
     # All treated users get credit_5; control users get "none"
     treatment_lever = np.where(treated == 1, "credit_5", "none")
 
-    # Base uplift for treated users (credit_5)
-    base_uplift = np.where(treated == 1, _CREDIT_5_BASE_UPLIFT, 0.0)
+    # Per-user relative effect of credit_5, with segment heterogeneity.
+    # Defined for EVERY user (it is a potential outcome), whether or not
+    # they were assigned to treatment.
+    rel_effect = np.full(n, _CREDIT_5_BASE_RELATIVE_EFFECT)
+    # Users with recent payment failures respond strongly to a credit
+    rel_effect[payment_failures_30d > 0] *= 1.6
+    # Trial-drop window (tenure = 2) responds well to a small credit
+    rel_effect[tenure_months == 2] *= 1.8
+    # Sleeping dogs: the offer reminds them to cancel (+50% churn)
+    rel_effect[is_sleeping_dog] = -0.5
 
-    # Segment-based heterogeneity modulators for credit_5 (multiplicative)
-    mod = np.ones(n)
-    treated_mask = treated == 1
-    # Users with recent payment failures respond STRONGLY to credit_5
-    mod[treated_mask & (payment_failures_30d > 0)] *= 1.6
-    # Trial-drop window (tenure=2) responds very well to a small credit
-    mod[treated_mask & (tenure_months == 2)] *= 1.8
-
-    # Sleeping dogs: credit_5 BACKFIRES (negative uplift)
-    mod[is_sleeping_dog & treated_mask] = -0.6
-
-    # True per-user uplift for credit_5
-    # Convention: positive = churn REDUCTION (retention lift)
-    true_uplift = base_uplift * mod
-
-    # Counterfactual outcome: p_treated = clip(p_control - true_uplift)
-    p_treated = np.clip(churn_prob - true_uplift, 0.001, 0.999)
+    # Potential outcomes. true_uplift = P(churn | control) - P(churn |
+    # credit_5): the absolute churn reduction the credit causes for this
+    # user (negative for sleeping dogs).
+    p_treated = np.clip(churn_prob * (1 - rel_effect), 0.0, 1.0)
+    true_uplift = churn_prob - p_treated
     churned_if_treated = rng.binomial(1, p_treated).astype(int)
 
     # Observed outcome under the actual assignment (what the retention
@@ -405,10 +403,9 @@ def main(
     print("  Lever mix (treated only):")
     for lever, count in df[df["treated"] == 1]["treatment_lever"].value_counts().items():
         print(f"    {lever:<18}  n={count:>5,}  ({count / (df['treated'] == 1).sum():.1%})")
-    print(f"  Mean true uplift (treated): "
-          f"{df.loc[df['treated'] == 1, 'true_uplift'].mean():.4f}")
+    print(f"  Mean true uplift (all users): {df['true_uplift'].mean():.4f}")
     print(f"  Sleeping dogs (~5%, negative uplift): "
-          f"{(df.loc[df['treated'] == 1, 'true_uplift'] < 0).mean():.1%}")
+          f"{(df['true_uplift'] < 0).mean():.1%}")
     control_churn = df.loc[df["treated"] == 0, "y_observed"].mean()
     treated_churn = df.loc[df["treated"] == 1, "y_observed"].mean()
     print(f"  Naive ATE (control - treated churn rate): "

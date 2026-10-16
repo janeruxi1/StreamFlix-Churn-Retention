@@ -26,7 +26,7 @@
 # - Train **four uplift meta-learners** (S-, T-, X-, ClassTransformation) on the
 #   `credit_5` lever using the experimental data the simulator now provides.
 # - Compare them on **Qini AUC** and **retention-lift-at-K**.
-# - Pick a winner and save the fitted model for Phase 6 to consume.
+# - Pick a winner and save the fitted model so Phase 9 can test it against the v1 policy.
 # - Sanity-check by inspecting the **persuadable / sleeping-dog** split.
 #
 # ## Sections
@@ -37,7 +37,7 @@
 # | **B. Bake-off** | Train four uplift learners, all tracked in MLflow |
 # | **C. Comparison** | Cross-model table + Qini curves |
 # | **D. Inspection** | Persuadable vs sleeping-dog deep-dive |
-# | **E. Persist** | Save winner for Phase 6 to consume |
+# | **E. Persist** | Save winner for Phase 9 to test |
 # | **F. Verdict** | Final call + Phase 6 handoff |
 #
 # Runs land in the local MLflow store (`mlflow.db`), experiment `streamflix_churn`.
@@ -138,9 +138,19 @@ t = sub["treated"].values.astype(int)
 print(f"Total users        : {len(sub):,}")
 print(f"  control (t=0)    : {(t == 0).sum():,}")
 print(f"  treated (t=1)    : {(t == 1).sum():,}  (all got {FOCUS_LEVER})")
-print(f"Naive ATE          : "
-      f"{sub.loc[t == 0, 'y_observed'].mean() - sub.loc[t == 1, 'y_observed'].mean():+.4f}")
-print(f"  (control_churn - treated_churn, higher = treatment helps)")
+p_ctrl = sub.loc[t == 0, "y_observed"].mean()
+p_trt = sub.loc[t == 1, "y_observed"].mean()
+ate = p_ctrl - p_trt
+se_ate = np.sqrt(p_ctrl * (1 - p_ctrl) / (t == 0).sum() + p_trt * (1 - p_trt) / (t == 1).sum())
+print(f"Churn: control {p_ctrl:.2%}, treated {p_trt:.2%}")
+print(f"ATE (churn reduction): {ate:+.4f}  95% CI [{ate - 1.96 * se_ate:+.4f}, "
+      f"{ate + 1.96 * se_ate:+.4f}]")
+print(f"Relative effect: {ate / p_ctrl:.1%} of would-be churners retained "
+      f"(95% CI {(ate - 1.96 * se_ate) / p_ctrl:.1%} to {(ate + 1.96 * se_ate) / p_ctrl:.1%}); "
+      f"the Phase 6 policy assumes 15%.")
+print(f"Smallest ATE this experiment could detect (80% power): {2.8 * se_ate:.4f}. "
+      "Differences in effect BETWEEN subgroups are smaller still,\nso learning "
+      "who responds is much harder than confirming that the credit works on average.")
 
 # Train / test split, stratified on treatment
 X_train, X_test, y_train, y_test, t_train, t_test = train_test_split(
@@ -358,7 +368,7 @@ print(f"Top-vs-bottom decile actual-lift gap: {top_bottom_gap:+.4f}  "
 
 
 # %% [markdown]
-# ## E. Persist winner for Phase 6 to consume
+# ## E. Persist winner for Phase 9 to test
 
 # %%
 print("\n" + "=" * 70)
@@ -393,7 +403,7 @@ register_production_model(
 
 
 # %% [markdown]
-# ## F. Verdict + Phase 6 handoff
+# ## F. Verdict + Phase 9 handoff
 
 # %%
 print("\n" + "=" * 70)
@@ -405,18 +415,20 @@ print("=" * 70)
 # using the same LTV_avg + cost we used for the persuadable threshold.
 retention_at_10 = results[winner_name]["retention_lift_at_10pct"]
 retention_at_30 = results[winner_name]["retention_lift_at_30pct"]
-n_eligible = len(X_test)  # eligible = user could have been targeted
-# @10% budget: target ~10% of eligible users, retention_lift extra saves
-users_at_10  = int(n_eligible * 0.10)
-users_at_30  = int(n_eligible * 0.30)
-extra_saves_at_10  = users_at_10 * retention_at_10
-extra_saves_at_30  = users_at_30 * retention_at_30
-dollar_gain_at_10  = extra_saves_at_10 * ltv_mean
-dollar_gain_at_30  = extra_saves_at_30 * ltv_mean
-cost_at_10 = users_at_10 * lever_cost
-cost_at_30 = users_at_30 * lever_cost
-net_ev_at_10 = dollar_gain_at_10 - cost_at_10
-net_ev_at_30 = dollar_gain_at_30 - cost_at_30
+n_eligible = len(X_test)
+ate_test = y_test[t_test == 0].mean() - y_test[t_test == 1].mean()
+users_at_10 = int(n_eligible * 0.10)
+users_at_30 = int(n_eligible * 0.30)
+# Extra saves vs giving the credit to the same number of RANDOM users:
+# (lift among the model's top k%) minus (average lift) per targeted user.
+extra_saves_at_10 = users_at_10 * (retention_at_10 - ate_test)
+extra_saves_at_30 = users_at_30 * (retention_at_30 - ate_test)
+extra_dollars_at_10 = extra_saves_at_10 * ltv_mean
+extra_dollars_at_30 = extra_saves_at_30 * ltv_mean
+
+from scipy.stats import spearmanr
+true_uplift_test = sub.loc[X_test.index, "true_uplift"].values
+rank_corr = spearmanr(retention_lift, true_uplift_test).statistic
 
 print(f"""
 Winner on Qini AUC: {winner_name}
@@ -425,29 +437,30 @@ Winner on Qini AUC: {winner_name}
   Retention lift @10%: {retention_at_10:+.4f}   ({retention_at_10 * 100:+.2f}pp)
 
 Interpretation:
-  Random ranker would score Qini AUC = 0. A positive score means our
-  model ranks users better than random when picking who to treat.
-  Retention lift @10% = additional retained users per targeted user
-  vs. random targeting -- directly the ROI upside for a tight budget.
+  Qini AUC = 0 is a random ranking. Retention lift @k is the observed churn
+  reduction (control minus treated churn) among the top k% of test users the
+  model ranks highest; the average effect over all test users is {ate_test:+.4f}.
+  Rank correlation of predicted with TRUE per-user uplift (simulator ground
+  truth, test rows): {rank_corr:+.2f}.
 
-Business dollar impact (LTV_avg = ${ltv_mean:.0f}, {FOCUS_LEVER} cost = ${lever_cost:.0f}):
-  * Test set has n={n_eligible:,} eligible users.
-  * Target top 10%: {users_at_10:,} users -> ~{extra_saves_at_10:.0f} extra retained
-    users vs random ranking -> ${dollar_gain_at_10:,.0f} extra revenue
-    at ${cost_at_10:,.0f} extra cost -> net ${net_ev_at_10:+,.0f} EV.
-  * Target top 30%: {users_at_30:,} users -> ~{extra_saves_at_30:.0f} extra retained
-    users vs random -> ${dollar_gain_at_30:,.0f} extra revenue
-    at ${cost_at_30:,.0f} extra cost -> net ${net_ev_at_30:+,.0f} EV.
+Business translation (LTV_avg = ${ltv_mean:.0f}, {FOCUS_LEVER} cost = ${lever_cost:.0f}):
+  * Top 10% ({users_at_10:,} users): {extra_saves_at_10:+.1f} extra saves vs treating
+    {users_at_10:,} random users -> {extra_dollars_at_10:+,.0f} dollars.
+  * Top 30% ({users_at_30:,} users): {extra_saves_at_30:+.1f} extra saves vs random
+    -> {extra_dollars_at_30:+,.0f} dollars.
+  Each test-set lift@k is itself noisy (a few dozen churners per arm), so
+  these figures are indicative only.
 
-Phase 9 handoff (this is where the uplift model gets used):
-  * Phase 9 (`notebooks/09_head_to_head.py`) loads this pickle via
-    `src/models/production.py:load_production_uplift_model()` and runs
-    a three-way head-to-head against v0 (blanket) and v1 (propensity,
-    Phase 6). The uplift-aware policy uses per-user predicted retention
-    lift here, not the constant 15% assumption Phase 6 uses.
-  * Phase 6 stays on the propensity + constant-uplift rule -- v1 is
-    still the shipping policy; v2 (uplift-aware) is validated in
-    Phase 9 before we'd promote it.
+Read: the experiment confirms the credit works ON AVERAGE (Section A), at about
+the 15% the Phase 6 policy assumes. It is far too small to learn WHO responds:
+no learner ranks users reliably better than random, and the deciles are not
+monotone. The Qini winner is persisted only so Phase 9 can test it against the
+v1 policy; it is not a candidate for production.
+
+Phase 9 (`notebooks/09_policy_comparison.py`) loads this pickle via
+`src/models/production.py:load_production_uplift_model()` and compares the
+uplift-based policy with v1 at the same spend, against the simulator's ground
+truth.
 
 MLflow: browse runs under experiment 'streamflix_churn' in `mlflow ui`.
 """)

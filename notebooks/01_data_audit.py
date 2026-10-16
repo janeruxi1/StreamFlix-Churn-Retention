@@ -164,7 +164,7 @@ print(f"  watch_hours medians: "
       f"7d={df['watch_hours_last_7d'].median():.1f}  "
       f"30d={df['watch_hours_last_30d'].median():.1f}  "
       f"90d={df['watch_hours_last_90d'].median():.1f}  "
-      "(7d is per-week so smaller; 30d ~ 90d when trend=0)")
+      "(per-day rates are similar when the trend is flat)")
 
 
 # %% [markdown]
@@ -259,7 +259,9 @@ print(f"Saved -> {FIG_DIR}/01_tenure_churn_curve.png")
 print("\n" + "=" * 70)
 print("F. UNIVARIATE CHURN SIGNAL SCREEN")
 print("=" * 70)
-print("(>= 0.10 = strong, 0.05-0.10 = moderate, < 0.05 = weak)\n")
+print("Point-biserial correlation with the churn label. With a 5% base rate,\n"
+      "even useful predictors show small correlations; this is a relative screen.\n"
+      "(|r| >= 0.10 = strongest here, 0.05-0.10 = moderate, < 0.05 = weak)\n")
 
 numeric_cols = [
     "tenure_months", "monthly_revenue",
@@ -279,9 +281,8 @@ for col in bool_cols:
     corrs.append((col, df[col].astype(int).corr(df["churned_next_30d"])))
 
 corrs.sort(key=lambda x: abs(x[1]), reverse=True)
-print("(>= 0.10 = STRONG, 0.05-0.10 = moderate, < 0.05 = weak)\n")
 for col, corr in corrs:
-    flag = "STRONG" if abs(corr) > 0.10 else (
+    flag = "strongest" if abs(corr) > 0.10 else (
            "moderate" if abs(corr) > 0.05 else "weak")
     print(f"  {col:<26}  corr = {corr:+.3f}  {flag}")
 
@@ -307,7 +308,7 @@ for y, (feat, c) in enumerate(zip(corr_df["feature"], corr_df["corr"])):
     ax.text(c + offset, y, f"{c:+.3f}", va="center", ha=ha, fontsize=8)
 ax.set_xlabel("Pearson correlation with churn (next 30d)")
 ax.set_title("Univariate signal screen -- sorted by strength\n"
-             "blue=stabilizer  |  orange=driver  |  red shading=STRONG band",
+             "blue=stabilizer  |  orange=driver  |  red shading=|r| >= 0.10",
              fontweight="bold", fontsize=11)
 ax.grid(axis="x", linestyle="--", alpha=0.4)
 ax.set_xlim(-0.16, 0.16)
@@ -352,6 +353,6 @@ for label, ok in checks:
     print(f"  [{'PASS' if ok else 'FAIL'}]  {label}")
 
 if all(ok for _, ok in checks):
-    print("\nAll 7 checks pass. Data is workplace-realistic and ready for Phase 2.")
+    print("\nAll 7 checks pass. Data is ready for Phase 2.")
 else:
     print("\nOne or more checks failed. Investigate before proceeding.")

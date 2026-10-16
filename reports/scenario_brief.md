@@ -10,7 +10,7 @@
 
 StreamFlix's paid subscription business has ~2.1M active monthly subscribers across three tiers (Basic, Standard, Premium). **Monthly churn averages ~5.5%** but spikes meaningfully at the 2-month and 12-month tenure points (free-trial-to-paid drop-off and annual-anniversary reassessment).
 
-Up to now, the Retention team has run a single broad-brush campaign — a generic $5 monthly credit offered to *any* subscriber who hits month 11 — which costs ~$280k/month and has unclear ROI because we never measure who would have stayed anyway.
+Up to now, the Retention team has run a single broad-brush campaign — a generic $5 monthly credit offered to *any* subscriber who hits month 11 (roughly 65–70k people a month) — which costs ~$330k/month and has unclear ROI because we never measure who would have stayed anyway.
 
 The team wants to **move from blanket campaigns to a cost-aware, model-driven targeting system.**
 
@@ -27,22 +27,20 @@ Three decisions need to be made for each subscriber every month:
 
 The Retention team has negotiated three pre-built interventions with the relevant ops teams:
 
-| Intervention | Cost per offer | Estimated retention uplift (vs no offer) | Notes |
+| Intervention | Cost per offer | Estimated uplift: share of would-be churners retained | Notes |
 |---|---|---|---|
-| **Curated playlist email** | $1 | +6pp | Lightweight; safe to offer anyone |
-| **$5 monthly credit** | $5 | +14pp | The current default; assume real cost = $5 of LTV |
-| **1-month free Premium upgrade** | $12 | +22pp | Best uplift but tier-upgrade pressure on revenue |
+| **Curated playlist email** | $1 | 5% | Lightweight; safe to offer anyone |
+| **$5 monthly credit** | $5 | 15% | The current default; assume real cost = $5 of LTV |
+| **1-month free Premium upgrade** | $12 | 25% | Best uplift but tier-upgrade pressure on revenue |
 
-(These uplift estimates come from a prior A/B test the Growth team ran; the model should treat them as inputs, not learn them. For this project we'll use these published values as ground truth.)
+(These estimates come from an earlier pilot. Treat them as planning assumptions, not measured truth: a randomized holdout for the $5 credit is running and will report back.)
 
 ## Economic parameters
 
 | Parameter | Value | Notes |
 |---|---|---|
-| Average customer LTV (Basic) | $9 / month × 14 expected months retained | $126 / churn averted |
-| Average customer LTV (Standard) | $14 / month × 16 expected months | $224 / churn averted |
-| Average customer LTV (Premium) | $19 / month × 18 expected months | $342 / churn averted |
-| Monthly retention budget | **$200,000** | Hard cap |
+| Monthly price | Basic $9, Standard $14, Premium $19 | LTV per churn averted should be estimated from our own retention data, not assumed |
+| Monthly retention budget | **$200,000** | Hard cap, whole subscriber base |
 | Decision horizon | 30 days | Predict churn in next 30 days |
 
 ## Decision sought
@@ -57,7 +55,7 @@ The Retention team has negotiated three pre-built interventions with the relevan
 
 - **Primary decision-maker:** Marcus Lee (PM, Retention)
 - **Finance:** must sign off on expected ROI
-- **Ops:** capacity-constrained on the Premium upgrade — cap at 10k offers/month
+- **Ops:** capacity-constrained on the Premium upgrade — cap at 10k offers/month across the base
 - **CX team:** wants to ensure we're not over-targeting one-time grievance churners
 
 ## What we want from the data science team
@@ -72,4 +70,4 @@ The Retention team has negotiated three pre-built interventions with the relevan
 
 - **Calibration matters more than discrimination.** A model that ranks well but is miscalibrated will mis-size the intervention budget. Calibration is a first-class metric.
 - **Segments may need different policies.** New users (tenure < 3 months) may respond very differently to a curated playlist than tenured users.
-- **Anchoring.** The Curated-playlist arm of the prior A/B test had a small treatment group (~3k); the +6pp uplift estimate carries wider uncertainty than the $5-credit and Premium-upgrade estimates.
+- **Anchoring.** The curated-playlist arm of the pilot had a small treatment group (~3k); its 5% estimate carries wider uncertainty than the other two.

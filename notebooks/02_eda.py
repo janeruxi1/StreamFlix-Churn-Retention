@@ -21,7 +21,7 @@
 # |---|---|
 # | **A. Population overview** | Who is in the dataset |
 # | **B. Churn rates by segment** | Which categorical slices differ from baseline |
-# | **C. Kaplan-Meier survival** | Structural covariates (5 strata) |
+# | **C. Survival curves** | Structural covariates (5 strata) |
 # | **C2. Landmark analysis** | Handles time-varying covariate (engagement_cohort) |
 # | **C3. Sensitivity check** | Landmark-choice robustness |
 # | **D. Hazard by tenure** | m2 / m12 spike visualization |
@@ -133,37 +133,49 @@ for col in seg_cols:
 
 
 # %% [markdown]
-# ## C. Kaplan-Meier survival curves — structural covariates
+# ## C. Survival curves — structural covariates
+#
+# The data is a single snapshot: each subscriber is seen once, at their current tenure,
+# with a 30-day churn outcome. So the subscribers who can churn "in month t" are the ones
+# whose tenure is t now, and the monthly hazard is
+#
+#     h(t) = churners at tenure t / subscribers at tenure t,   S(t+1) = S(t) × (1 − h(t))
+#
+# This is a life table built from a synthetic cohort: it assumes month-t hazards are
+# stable over time. (A Kaplan-Meier at-risk set of "tenure ≥ t" would be wrong here:
+# subscribers above t already survived month t, but that was never observed as an
+# event, so the hazards — and churn — would come out far too low.) The same estimator
+# (`src/decisions/ltv.py`) drives the LTV used in Phase 6.
 #
 # Stratify on covariates set **at or near signup** that stay stable (plan_tier,
-# billing_cycle, payment_method, auto_renew). KM's *"covariate fixed at t=0"* assumption
-# holds for these. Time-varying covariates (engagement_cohort) are handled separately in
-# C2 with landmark analysis.
+# billing_cycle, payment_method, auto_renew). Time-varying covariates
+# (engagement_cohort) are handled separately in C2 with landmark analysis.
 
 # %%
 print("\n" + "=" * 70)
-print("C. KAPLAN-MEIER SURVIVAL CURVES (structural covariates)")
+print("C. SURVIVAL CURVES (structural covariates)")
 print("=" * 70)
 
 
 def km(durations: np.ndarray, events: np.ndarray) -> pd.DataFrame:
-    """Simple Kaplan-Meier estimator -- no lifelines dependency.
+    """Discrete-time survival curve from the snapshot (see the note above).
 
-    durations : tenure_months at observation
-    events    : 1 if churned in the next 30 days, 0 if censored (still active)
+    durations : tenure_months at the snapshot
+    events    : 1 if churned in the next 30 days, else 0
+    Returns S at the end of each month, starting from the youngest tenure
+    present (so a landmark subset starts at its landmark with S = 1).
     """
-    durations = np.asarray(durations)
-    events = np.asarray(events)
-    event_times = np.sort(np.unique(durations[events == 1]))
-    rows = []
+    durations = np.asarray(durations).astype(int)
+    events = np.asarray(events).astype(int)
+    rows = [(durations.min(), 1.0, np.nan, np.nan)]
     s = 1.0
-    for t in event_times:
-        d = ((durations == t) & (events == 1)).sum()
-        n = (durations >= t).sum()
-        if n == 0:
-            break
-        s *= (1 - d / n)
-        rows.append((t, s, n, d))
+    for t in range(durations.min(), durations.max() + 1):
+        at_t = durations == t
+        n = int(at_t.sum())
+        d = int(events[at_t].sum())
+        if n:
+            s *= 1 - d / n
+        rows.append((t + 1, s, n, d))
     return pd.DataFrame(rows, columns=["t", "S", "at_risk", "events"])
 
 
@@ -178,7 +190,7 @@ ax.step(overall["t"], overall["S"], where="post", color="#5B8FF9", linewidth=2)
 ax.set_title("Overall survival S(t)", fontweight="bold")
 ax.set_xlabel("tenure (months)")
 ax.set_ylabel("P(still subscribed)")
-ax.set_ylim(0.5, 1.01)
+ax.set_ylim(0, 1.01)
 ax.grid(True, linestyle="--", alpha=0.4)
 
 # Panel 2: plan tier
@@ -191,7 +203,7 @@ for plan, color in {"Basic": "#F6735B", "Standard": "#F6BD16",
             label=f"{plan} (n={len(sub):,})")
 ax.set_title("Survival by plan tier", fontweight="bold")
 ax.set_xlabel("tenure (months)")
-ax.set_ylim(0.5, 1.01)
+ax.set_ylim(0, 1.01)
 ax.legend(fontsize=9)
 ax.grid(True, linestyle="--", alpha=0.4)
 
@@ -204,7 +216,7 @@ for billing, color in {"monthly": "#F6735B", "annual": "#5AD8A6"}.items():
             label=f"{billing} (n={len(sub):,})")
 ax.set_title("Survival by billing cycle", fontweight="bold")
 ax.set_xlabel("tenure (months)")
-ax.set_ylim(0.5, 1.01)
+ax.set_ylim(0, 1.01)
 ax.legend(fontsize=9)
 ax.grid(True, linestyle="--", alpha=0.4)
 
@@ -219,7 +231,7 @@ for ar, color, label in [(True, "#5AD8A6", "auto-renew ON"),
 ax.set_title("Survival by auto-renew status", fontweight="bold")
 ax.set_xlabel("tenure (months)")
 ax.set_ylabel("P(still subscribed)")
-ax.set_ylim(0.5, 1.01)
+ax.set_ylim(0, 1.01)
 ax.legend(fontsize=9)
 ax.grid(True, linestyle="--", alpha=0.4)
 
@@ -236,14 +248,14 @@ for pm, color in pm_colors.items():
             label=f"{pm} (n={len(sub):,})")
 ax.set_title("Survival by payment method", fontweight="bold")
 ax.set_xlabel("tenure (months)")
-ax.set_ylim(0.5, 1.01)
+ax.set_ylim(0, 1.01)
 ax.legend(fontsize=9)
 ax.grid(True, linestyle="--", alpha=0.4)
 
 # Hide the 6th (empty) panel
 axes[5].set_visible(False)
 
-plt.suptitle("Kaplan-Meier survival curves -- structural covariates",
+plt.suptitle("Survival curves (life table from the snapshot) -- structural covariates",
              fontsize=13, fontweight="bold")
 plt.tight_layout()
 plt.savefig(FIG_DIR / "02_kaplan_meier.png", dpi=140, bbox_inches="tight")
@@ -259,7 +271,7 @@ for col in ["auto_renew", "payment_method"]:
 # ## C2. Landmark analysis — engagement_cohort (time-varying covariate)
 #
 # `engagement_cohort` is **time-varying**: a user labeled `casual` at month 3 might be
-# `heavy` at month 12. Naive KM stratification by current cohort suffers from
+# `heavy` at month 12. Naive stratification by current cohort suffers from
 # **immortal-time bias** — the `heavy` cohort is enriched with users who survived long
 # enough to *become* heavy.
 #
@@ -294,12 +306,12 @@ for cohort, color in cohort_colors.items():
     curve = km(sub["tenure_months"], sub["churned_next_30d"])
     ax.step(curve["t"], curve["S"], where="post", color=color, linewidth=2,
             label=f"{cohort} (n={len(sub):,})")
-ax.set_title("Naive KM by current cohort\n"
+ax.set_title("Naive curves by current cohort\n"
              "(biased -- cohort label is time-varying)",
              fontweight="bold", fontsize=10)
 ax.set_xlabel("tenure (months)")
 ax.set_ylabel("P(still subscribed)")
-ax.set_ylim(0.5, 1.01)
+ax.set_ylim(0, 1.01)
 ax.legend(fontsize=9)
 ax.grid(True, linestyle="--", alpha=0.4)
 
@@ -313,11 +325,11 @@ for cohort, color in cohort_colors.items():
             label=f"{cohort} (n={len(sub):,})")
 ax.axvline(LANDMARK, color="black", linestyle=":", linewidth=1.5,
            alpha=0.6, label=f"landmark t*={LANDMARK}")
-ax.set_title(f"Landmark KM by cohort\n"
+ax.set_title(f"Landmark curves by cohort\n"
              f"(conditioned on survival to month {LANDMARK})",
              fontweight="bold", fontsize=10)
 ax.set_xlabel("tenure (months)")
-ax.set_ylim(0.5, 1.01)
+ax.set_ylim(0, 1.01)
 ax.legend(fontsize=9)
 ax.grid(True, linestyle="--", alpha=0.4)
 

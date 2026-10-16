@@ -389,12 +389,13 @@ for base, tuned in [("lr_baseline", "lr_tuned"),
                                  - comparison.loc[base, "pr_auc"]))
 mean_tuning_delta = sum(tuning_deltas) / len(tuning_deltas) if tuning_deltas else 0.003
 
-print(f"\nFamily-choice spread across all models: {family_spread:.4f} PR-AUC")
-print(f"Mean tuning-effort delta within a family:  {mean_tuning_delta:.4f} PR-AUC")
-if mean_tuning_delta > 0:
-    print(f"Family choice dominates tuning by ~{family_spread / mean_tuning_delta:.1f}x on this run.\n")
+print(f"\nSpread across all models:  {family_spread:.4f} PR-AUC")
+print(f"Mean gain from tuning:     {mean_tuning_delta:.4f} PR-AUC")
+print("Both are small next to the test-set noise: the bootstrap 95% interval for "
+      "PR-AUC is about +/-0.03\n(reports/metric_confidence_intervals.md). On 534 test "
+      "churners these models are statistically tied.\n")
 
-# Explicit tree-model sub-ranking (so the HistGBM > XGBoost story is unambiguous)
+# Tree-model sub-ranking
 tree_models = [n for n in comparison.index
                if any(k in n for k in ["hist_gbm", "xgboost", "random_forest"])]
 if tree_models:
@@ -408,22 +409,20 @@ print("""
 PRODUCTION CHOICE: calibrated HistGradientBoosting (Phase 4 output).
 
 Reasoning:
-  1. HistGBM wins the tree-model bake-off vs XGBoost on PR-AUC
-     (both default AND Optuna-tuned -- see tree-model sub-ranking above).
-     Same tree-model production properties -- SHAP TreeExplainer support,
-     native missing-value handling, noise tolerance -- and drops the
-     external xgboost dependency (sklearn-only).
+  1. The metrics don't pick a winner: logistic regression, tuned XGBoost
+     and tuned HistGBM are within noise of each other (see above).
+     Ranking them on the test set and shipping the top one would be
+     choosing on noise.
 
-  2. LR is competitive on raw PR-AUC but lacks tree-model production
-     properties. Chose HistGBM on FULL criteria, not raw metric alone.
-     Trade-off documented, not hidden.
+  2. Among the tied models, HistGBM is kept for practical reasons: no
+     extra dependency (sklearn only), native missing-value handling,
+     and exact, fast tree SHAP for the per-user explanations in
+     Phase 5. It can also pick up interactions if richer real-world
+     features are added.
 
-  3. Family choice dominates tuning at this dataset size (see the
-     family_spread vs mean tuning delta printed above). Bake-off
-     (which family?) is a better investment than deeper Optuna trials
-     on a single family. This bake-off tuned every candidate so the
-     family comparison is fair -- nobody won by getting more tuning
-     attention than the others.
+  3. Logistic regression is an equally defensible, simpler choice on
+     this data. It is persisted as the baseline and is the first
+     fallback if the tree model ever drifts or misbehaves.
 
 LR is persisted as the documented baseline in `models/churn_model_v1.pkl`
 under the `baseline_model` key. `production_model` is calibrated HistGBM.
@@ -431,7 +430,7 @@ under the `baseline_model` key. `production_model` is calibrated HistGBM.
 The full run log is in mlflow.db -- compare in `mlflow ui` at localhost:5000.
 Runs land under experiment 'streamflix_churn':
   Phase 4  -> lr_baseline, hist_gbm_default, hist_gbm_tuned,
-              hist_gbm_{winner}_calibrated (winner chosen on TEST PR-AUC)
+              hist_gbm_tuned_calibrated
   Phase 4b -> lr_tuned, xgboost_default, xgboost_tuned, hist_gbm,
               hist_gbm_tuned, random_forest
   Phase 8  -> uplift_s_learner, uplift_t_learner, uplift_x_learner,

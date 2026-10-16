@@ -168,3 +168,44 @@ def test_blanket_campaign_cost_matches_users_times_price():
         cost_per_user=5.0, target_month=11, uplift=0.15,
     )
     assert result["total_cost"] == 50 * 5.0
+
+
+# ---- build_policy (budget-constrained, Lagrangian) ----------------------
+def test_build_policy_respects_budget_and_premium_cap():
+    from src.decisions.policy import build_policy
+    rng = np.random.default_rng(0)
+    p = rng.uniform(0, 0.5, 2000)
+    ltv = rng.choice([109.0, 187.0, 296.0], 2000)
+    pol = build_policy(p, ltv, budget=500.0, premium_cap_pct=0.01)
+    assert pol.loc[pol["will_target"], "cost"].sum() <= 500.0
+    assert (pol["best_lever"] == "premium_upgrade").sum() <= 20
+
+
+def test_build_policy_beats_greedy_ev_ranking_under_a_binding_budget():
+    """Charging each dollar its shadow price can only help net EV."""
+    from src.decisions.policy import build_policy
+    rng = np.random.default_rng(1)
+    p = rng.uniform(0, 0.4, 3000)
+    ltv = rng.choice([109.0, 187.0, 296.0], 3000)
+    budget = 800.0
+    greedy = apply_budget_cap(pick_best_lever(p, ltv, INTERVENTION_MENU), budget)
+    lagr = build_policy(p, ltv, budget, premium_cap_pct=1.0)
+    assert (summarize_policy(lagr)["net_expected_value"]
+            >= summarize_policy(greedy)["net_expected_value"] - 1e-9)
+
+
+def test_build_policy_unconstrained_matches_argmax_ev():
+    from src.decisions.policy import build_policy
+    rng = np.random.default_rng(2)
+    p = rng.uniform(0, 0.4, 1000)
+    ltv = rng.choice([109.0, 187.0, 296.0], 1000)
+    lagr = build_policy(p, ltv, budget=1e9, premium_cap_pct=1.0)
+    best = pick_best_lever(p, ltv, INTERVENTION_MENU)
+    assert (lagr["best_lever"].values == best["best_lever"].values).all()
+
+
+def test_sample_budget_scales_with_sample_size():
+    from src.decisions.policy import sample_budget, to_population
+    assert sample_budget(2_100_000) == pytest.approx(200_000.0)
+    assert sample_budget(50_000) == pytest.approx(200_000 * 50_000 / 2_100_000)
+    assert to_population(sample_budget(50_000), 50_000) == pytest.approx(200_000.0)

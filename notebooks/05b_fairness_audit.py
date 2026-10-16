@@ -40,7 +40,7 @@
 # | **A. Setup** | Score all subscribers with the v1 churn model |
 # | **B. PR-AUC by segment** | Discrimination parity across plan tier, tenure, country |
 # | **C. Calibration by segment** | Reliability curves stratified by plan tier |
-# | **D. Brier by segment** | Combined discrimination + calibration score |
+# | **D. Calibration by segment** | Predicted vs observed churn per segment |
 # | **E. Targeting rate by segment** | Does the policy over/under-serve any group? |
 # | **F. Recall parity (equal opportunity)** | Among true churners, who gets flagged? |
 # | **G. Verdict** | Which segments are OK, which need attention |
@@ -63,26 +63,27 @@ sys.path.insert(0, str(_project_root))
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.stats import binomtest
 from sklearn.metrics import average_precision_score, roc_auc_score, brier_score_loss
+from sklearn.model_selection import train_test_split
 
 from src.data.loader import load_subscribers
 from src.features.transforms import build_features
 from src.models.train import prepare_features
 from src.models.production import load_production_churn_model
 from src.models.evaluate import calibration_curve_points
-from src.decisions.policy import (
-    INTERVENTION_MENU, LTV_BY_TIER,
-    pick_best_lever, apply_budget_cap, apply_premium_cap,
-    PREMIUM_UPGRADE_CAP_PCT,
-)
+from src.decisions.policy import LTV_BY_TIER, build_policy, sample_budget
 
 FIG_DIR = Path("reports/figures")
 FIG_DIR.mkdir(parents=True, exist_ok=True)
-BUDGET = 200_000.0
 
 
 # %% [markdown]
-# ## A. Setup — score all subscribers with the v1 churn model
+# ## A. Setup — score subscribers with the v1 churn model
+#
+# Model-quality checks (Sections B-D) use only the 10,000-row **test split** from
+# Phase 4, which the model never saw. Policy checks (Sections E-F) use the whole base,
+# because the policy is applied to everyone.
 
 # %%
 print("=" * 70)
@@ -95,8 +96,13 @@ X, y = prepare_features(df)
 
 model, artifact = load_production_churn_model()
 X = X[artifact["feature_names"]]
-p_churn = model.predict_proba(X)[:, 1]
-y_true = y.values
+p_all = model.predict_proba(X)[:, 1]
+y_all = y.values
+BUDGET = sample_budget(len(df))
+
+# Same split as Phase 4 (60/20/20, stratified, seed 42) -> the test rows
+_, test_idx = train_test_split(np.arange(len(y)), test_size=0.20,
+                               stratify=y, random_state=42)
 
 # Segments to audit -- pull straight from raw features, not one-hots
 segments = pd.DataFrame({
@@ -110,9 +116,15 @@ segments = pd.DataFrame({
         labels=["m0-2 trial", "m3-5", "m6-11", "m12", "m13-24", "m25+"],
     ),
 })
+segments_all = segments
 
-print(f"Scored {len(df):,} subscribers")
-print(f"Base rate churn: {y_true.mean():.2%}")
+# Model-quality sections work on the held-out test rows only
+segments = segments_all.iloc[test_idx].reset_index(drop=True)
+p_churn = p_all[test_idx]
+y_true = y_all[test_idx]
+
+print(f"Scored {len(df):,} subscribers; model checks use the {len(test_idx):,} test rows")
+print(f"Base rate churn (test): {y_true.mean():.2%}")
 
 
 # %% [markdown]
@@ -201,15 +213,14 @@ ax.set_ylim(0, 0.6)
 ax.legend()
 ax.grid(True, linestyle="--", alpha=0.4)
 plt.tight_layout()
-plt.savefig(FIG_DIR / "10_calibration_by_tier.png", dpi=140, bbox_inches="tight")
-print(f"Saved -> {FIG_DIR}/10_calibration_by_tier.png")
+plt.savefig(FIG_DIR / "05b_calibration_by_tier.png", dpi=140, bbox_inches="tight")
+print(f"Saved -> {FIG_DIR}/05b_calibration_by_tier.png")
 plt.show()
 
 
 # %% [markdown]
 # ## C.2. Calibration parity by engagement cohort
 #
-# The interview prep + memo reference a **calibration gap on the casual cohort**.
 # The plan-tier calibration in Section C is standard; this stratifies by
 # engagement cohort, which is where the real story lives — engagement patterns
 # drive churn behavior more than plan tier does, so calibration miscalibration
@@ -249,22 +260,25 @@ ax.set_ylim(0, 0.6)
 ax.legend()
 ax.grid(True, linestyle="--", alpha=0.4)
 plt.tight_layout()
-plt.savefig(FIG_DIR / "10_calibration_by_cohort.png",
+plt.savefig(FIG_DIR / "05b_calibration_by_cohort.png",
             dpi=140, bbox_inches="tight")
-print(f"Saved -> {FIG_DIR}/10_calibration_by_cohort.png")
+print(f"Saved -> {FIG_DIR}/05b_calibration_by_cohort.png")
 plt.show()
 
 
 # %% [markdown]
-# ## D. Brier score by segment (combined discrimination + calibration)
+# ## D. Calibration-in-the-large by segment
 #
-# Brier score combines discrimination AND calibration in one number. Lower is better.
-# Segment-level Brier close to the overall Brier = model works equally well on that
-# segment. Big gaps = red flags.
+# Brier score is reported for reference, but it is NOT a calibration-parity metric:
+# it scales with the segment's base rate (p(1-p)), so a high-churn segment has a higher
+# Brier even when the model is perfectly calibrated there. The check that matters for
+# the EV rule is whether predicted churn matches observed churn within each segment:
+# the ratio of mean predicted P(churn) to the observed rate, with a binomial test of the
+# observed churner count against the count the model predicts.
 
 # %%
 print("\n" + "=" * 70)
-print("D. BRIER SCORE BY SEGMENT")
+print("D. CALIBRATION-IN-THE-LARGE BY SEGMENT (test rows)")
 print("=" * 70)
 
 brier_rows = []
@@ -276,43 +290,45 @@ for seg_col in ["plan_tier", "engagement_cohort", "tenure_bucket"]:
         if len(y_sub) < 100:
             continue
         b = brier_score_loss(y_sub, p_sub)
+        expected = p_sub.mean()
+        observed = y_sub.mean()
+        test = binomtest(int(y_sub.sum()), len(y_sub), float(expected))
         brier_rows.append({
             "segment_col": seg_col, "segment": str(val),
-            "n": len(y_sub), "brier": b,
-            "delta_vs_overall": b - overall_brier,
+            "n": len(y_sub), "observed": observed, "predicted": expected,
+            "pred_over_obs": expected / observed if observed > 0 else np.nan,
+            "binom_p": test.pvalue,
+            "brier": b, "delta_vs_overall": b - overall_brier,
         })
-brier_df = pd.DataFrame(brier_rows).sort_values("delta_vs_overall")
-print(brier_df.round(4).to_string(index=False))
+brier_df = pd.DataFrame(brier_rows).sort_values("pred_over_obs")
+print(brier_df.drop(columns=["delta_vs_overall"]).round(4).to_string(index=False))
+print("\npred_over_obs > 1: the model over-predicts churn in that segment; < 1: under-predicts.")
 
 fig, ax = plt.subplots(figsize=(9, 6))
-brier_df_sorted = brier_df.sort_values("delta_vs_overall")
-bar_colors = [
-    "#5AD8A6" if abs(d) < 0.005
-    else ("#F6BD16" if abs(d) < 0.01 else "#F6735B")
-    for d in brier_df_sorted["delta_vs_overall"]
-]
-ax.barh([f"{r['segment_col']}={r['segment']}" for _, r in brier_df_sorted.iterrows()],
-        brier_df_sorted["delta_vs_overall"],
-        color=bar_colors, edgecolor="white")
-ax.axvline(0, color="black", linewidth=0.6)
-ax.axvspan(-0.005, 0.005, alpha=0.08, color="green",
-           label="within noise (< 0.005)")
-ax.set_xlabel("Brier delta vs overall  (positive = worse than overall)")
-ax.set_title("Brier score parity across segments\n"
-             "green bars = within noise band; red = notable gap",
-             fontweight="bold")
+cal_sorted = brier_df.sort_values("pred_over_obs")
+flag = ((cal_sorted["pred_over_obs"] < 0.8) | (cal_sorted["pred_over_obs"] > 1.25)) & \
+       (cal_sorted["binom_p"] < 0.05)
+ax.barh([f"{r['segment_col']}={r['segment']}" for _, r in cal_sorted.iterrows()],
+        cal_sorted["pred_over_obs"] - 1, left=1,
+        color=np.where(flag, "#F6735B", "#5AD8A6"), edgecolor="white")
+ax.axvline(1, color="black", linewidth=0.8)
+ax.axvspan(0.8, 1.25, alpha=0.08, color="green", label="tolerance band 0.8-1.25")
+ax.set_xlabel("Mean predicted / observed churn  (1 = calibrated)")
+ax.set_title("Calibration-in-the-large by segment (test rows)\n"
+             "red = outside the band and binomial p < 0.05", fontweight="bold")
 ax.legend(loc="lower right")
 ax.grid(axis="x", linestyle="--", alpha=0.4)
 plt.tight_layout()
-plt.savefig(FIG_DIR / "10_brier_by_segment.png", dpi=140, bbox_inches="tight")
-print(f"\nSaved -> {FIG_DIR}/10_brier_by_segment.png")
+plt.savefig(FIG_DIR / "05b_calibration_by_segment.png", dpi=140, bbox_inches="tight")
+print(f"\nSaved -> {FIG_DIR}/05b_calibration_by_segment.png")
 plt.show()
 
 
 # %% [markdown]
 # ## E. Targeting rate parity — does the v1 policy over/under-serve any group?
 #
-# Run v1 policy (propensity, full menu, $200k budget) and check what fraction of each
+# Run v1 policy (propensity, full menu, the brief budget scaled to the sample) on the
+# whole base and check what fraction of each
 # segment gets targeted. A big spread means the policy is concentrated on certain
 # segments -- may be legitimate (highest-EV users are in that segment) or may be a
 # fairness concern (segment gets systematically ignored).
@@ -323,16 +339,13 @@ print("E. TARGETING RATE BY SEGMENT (v1 policy)")
 print("=" * 70)
 
 ltv = raw["plan_tier"].map(LTV_BY_TIER).values
-policy = pick_best_lever(p_churn, ltv, INTERVENTION_MENU)
-policy = apply_budget_cap(policy, budget=BUDGET)
-policy = apply_premium_cap(policy, n_total=len(policy),
-                           cap_pct=PREMIUM_UPGRADE_CAP_PCT)
+policy = build_policy(p_all, ltv, budget=BUDGET)
 targeted = policy["will_target"].values
 
 overall_target_rate = targeted.mean()
 print(f"\nOverall targeting rate: {overall_target_rate:.2%}")
 print(f"(This is the fraction of the {len(policy):,}-user base the policy "
-      f"targets under the ${BUDGET/1000:.0f}k governance ceiling. Segment "
+      f"targets under the monthly budget (${BUDGET:,.0f} for this sample). Segment "
       f"target rates below are stated relative to this baseline.)\n")
 
 # Collect per-segment target rates so Section G can auto-flag any that
@@ -341,7 +354,7 @@ target_rate_rows = []
 for seg_col in ["plan_tier", "engagement_cohort", "tenure_bucket", "country"]:
     print(f"By {seg_col}:")
     seg_rows = []
-    for val, sub in segments.groupby(seg_col, observed=True):
+    for val, sub in segments_all.groupby(seg_col, observed=True):
         idx = sub.index
         n = len(sub)
         n_targeted = int(targeted[idx].sum())
@@ -374,7 +387,7 @@ print("\n" + "=" * 70)
 print("F. RECALL PARITY ON TRUE CHURNERS (v1 policy)")
 print("=" * 70)
 
-churner_mask = y_true == 1
+churner_mask = y_all == 1
 overall_recall = targeted[churner_mask].mean() if churner_mask.sum() else 0
 print(f"\nOverall recall on true churners: {overall_recall:.2%}\n")
 
@@ -384,9 +397,9 @@ recall_rows = []
 for seg_col in ["plan_tier", "engagement_cohort", "tenure_bucket"]:
     print(f"By {seg_col}:")
     rows = []
-    for val, sub in segments.groupby(seg_col, observed=True):
+    for val, sub in segments_all.groupby(seg_col, observed=True):
         idx = sub.index
-        y_sub = y_true[idx]
+        y_sub = y_all[idx]
         churners = idx[y_sub == 1]
         n_churners = len(churners)
         if n_churners == 0:
@@ -418,31 +431,32 @@ print("=" * 70)
 # ------------------------------------------------------------------
 # Thresholds for auto-flagging concerns.
 #
-# BRIER_DELTA_THRESHOLD = 0.01
-#   Rule of thumb: Brier is bounded [0, 1] and our overall Brier is
-#   ~0.047 for this dataset. A 0.01 absolute shift is ~20% relative --
-#   above measurement noise, below "catastrophically miscalibrated".
+# CALIBRATION: flag a segment when predicted/observed churn is outside
+#   [0.8, 1.25] AND the binomial test rejects at p < 0.05 (so small,
+#   noisy segments are not flagged on chance alone).
 #
 # RATE_RATIO_THRESHOLD = 0.5
 #   Standard "80% rule"-adjacent heuristic (we use 0.5 = 2x asymmetry
 #   as the harder line). Segments getting < half the overall targeting
 #   or recall rate are systematically under-served.
 # ------------------------------------------------------------------
-BRIER_DELTA_THRESHOLD = 0.01
+CAL_BAND = (0.8, 1.25)
 RATE_RATIO_THRESHOLD = 0.5
 
 concerns = []
 
-# --- (a) Calibration / Brier concerns -----------------------------
+# --- (a) Calibration concerns --------------------------------------
 for _, row in brier_df.iterrows():
-    if row["delta_vs_overall"] > BRIER_DELTA_THRESHOLD:
+    r = row["pred_over_obs"]
+    if (r < CAL_BAND[0] or r > CAL_BAND[1]) and row["binom_p"] < 0.05:
         concerns.append({
-            "kind": "BRIER",
+            "kind": "CALIBRATION",
             "segment": f"{row['segment_col']}={row['segment']}",
-            "detail": (f"Brier {row['brier']:.4f} vs overall "
-                       f"{overall_brier:.4f} (Δ +{row['delta_vs_overall']:.4f})"),
-            "action": ("Recommend a segment-specific Platt calibrator, or "
-                       "retrain with segment-stratified calibration set."),
+            "detail": (f"predicted {row['predicted']:.2%} vs observed "
+                       f"{row['observed']:.2%} churn (ratio {r:.2f}, "
+                       f"binomial p = {row['binom_p']:.3f}, n = {row['n']:,})"),
+            "action": ("Add a segment-aware calibrator or include the segment "
+                       "in the calibration model."),
         })
 
 # --- (b) Under-service in targeting rate --------------------------
@@ -480,7 +494,7 @@ Summary:
   Overall v1 recall on churners: {overall_recall:.2%}
 
 Thresholds used to auto-flag concerns:
-  Brier delta > {BRIER_DELTA_THRESHOLD} (~20% relative to overall)
+  Predicted/observed churn outside {CAL_BAND[0]}-{CAL_BAND[1]} with binomial p < 0.05
   Target-rate ratio  < {RATE_RATIO_THRESHOLD} (segment under-served)
   Recall ratio       < {RATE_RATIO_THRESHOLD} (equal-opportunity failure)
 
@@ -494,7 +508,7 @@ for c in concerns:
 
 if not concerns:
     print(f"""  None. All segments perform within noise on all three checks:
-    Brier delta < {BRIER_DELTA_THRESHOLD}, target rate >= {RATE_RATIO_THRESHOLD}x overall,
+    calibration within band, target rate >= {RATE_RATIO_THRESHOLD}x overall,
     recall >= {RATE_RATIO_THRESHOLD}x overall. Targeting-rate variation across segments
     reflects legitimate churn-rate + LTV differences captured by the
     model, not systematic under-service.
@@ -505,6 +519,9 @@ Reading this audit for the memo:
   - Calibration is the key thing to watch. If P(churn) means different
     things for different tiers / cohorts, the EV budget is being spent
     unequally even when the aggregate numbers look fine.
+  - Low targeting of a low-churn segment (heavy users, long tenure) is
+    the EV rule working, not a defect: the question is whether those
+    users' churn is UNDER-predicted, which Section D checks.
   - Targeting-rate spread across segments is EXPECTED (higher-churn or
     higher-LTV segments legitimately get more intervention). What's
     NOT expected is a segment being systematically dropped -- caught
@@ -514,7 +531,7 @@ Reading this audit for the memo:
     signals systematic under-service -- caught by the RECALL check.
 
 Charts for the memo:
-  - reports/figures/10_calibration_by_tier.png
-  - reports/figures/10_calibration_by_cohort.png    (casual-cohort story)
-  - reports/figures/10_brier_by_segment.png
+  - reports/figures/05b_calibration_by_tier.png
+  - reports/figures/05b_calibration_by_cohort.png
+  - reports/figures/05b_calibration_by_segment.png
 """)

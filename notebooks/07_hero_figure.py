@@ -61,8 +61,7 @@ from src.features.transforms import build_features
 from src.models.train import prepare_features
 from src.models.production import load_production_churn_model
 from src.decisions.policy import (
-    INTERVENTION_MENU, LTV_BY_TIER, PREMIUM_UPGRADE_CAP_PCT,
-    pick_best_lever, apply_budget_cap, apply_premium_cap,
+    INTERVENTION_MENU, LTV_BY_TIER, build_policy, sample_budget, to_population,
     summarize_policy, simulate_blanket_campaign,
 )
 
@@ -72,8 +71,9 @@ FIG_DIR.mkdir(parents=True, exist_ok=True)
 # %% [markdown]
 # ## Compute the two policies
 #
-# Re-runs the Phase 6 policies (blanket baseline + $200k targeted) so the hero figure
-# always reflects the current model + assumptions.
+# Re-runs the Phase 6 policies (blanket baseline + targeted at the brief's $200k/month
+# budget) so the hero figure always reflects the current model + assumptions. Results
+# are computed on the 50k sample and scaled to the full 2.1M base.
 
 # %%
 raw = load_subscribers("data/subscribers.csv")
@@ -93,7 +93,7 @@ tenure = df["tenure_months"].values
 # and Phase 9 source the same numbers.
 BLANKET_COST   = INTERVENTION_MENU["credit_5"]["cost"]
 BLANKET_UPLIFT = INTERVENTION_MENU["credit_5"]["uplift"]
-BUDGET         = 200_000.0  # $200k governance ceiling (matches Phase 6)
+BUDGET         = sample_budget(len(p_churn))  # brief budget, scaled to the sample
 
 # Blanket m11 baseline
 baseline = simulate_blanket_campaign(
@@ -101,23 +101,27 @@ baseline = simulate_blanket_campaign(
     cost_per_user=BLANKET_COST, target_month=11, uplift=BLANKET_UPLIFT,
 )
 
-# Targeted policy at the $200k governance ceiling
-policy = pick_best_lever(p_churn, ltv, INTERVENTION_MENU)
-policy = apply_budget_cap(policy, budget=BUDGET)
-policy = apply_premium_cap(policy, n_total=len(policy),
-                           cap_pct=PREMIUM_UPGRADE_CAP_PCT)
+# Targeted policy at the brief budget
+policy = build_policy(p_churn, ltv, budget=BUDGET)
 targeted = summarize_policy(policy, targeted_only=True)
+
+# Scale counts and dollars to the full base (ROI is scale-free)
+N = len(p_churn)
+for s in (baseline, targeted):
+    for key in ("n_targeted", "total_cost", "expected_retained_revenue",
+                "net_expected_value"):
+        s[key] = to_population(s[key], N)
 
 # Sanity check -- these should match Phase 6 Section I's verdict exactly
 # (same model, same policy, same budget cap). If they diverge, someone
 # has changed a downstream assumption without rerunning Phase 4.
-print("Sanity check vs Phase 6 Section I:")
+print("Sanity check vs Phase 6 (Section J, full base):")
 print(f"  Blanket net EV:  ${baseline['net_expected_value']:>12,.0f}  "
-      f"(Phase 6 Section I should match)")
+      f"(should match Phase 6, Section J)")
 print(f"  Targeted net EV: ${targeted['net_expected_value']:>12,.0f}  "
-      f"(Phase 6 Section I should match)")
-print(f"  Targeted users:  {targeted['n_targeted']:>12,}      "
-      f"(Phase 6 Section I should match)")
+      f"(should match Phase 6, Section J)")
+print(f"  Targeted users:  {targeted['n_targeted']:>12,.0f}      "
+      f"(should match Phase 6, Section J)")
 
 
 # %% [markdown]
@@ -132,13 +136,13 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6),
 
 # LEFT: net EV comparison (the money shot)
 policies = ["Current\n(blanket m11)", "Proposed\n(targeted)"]
-net_evs = [baseline["net_expected_value"], targeted["net_expected_value"]]
+net_evs = [baseline["net_expected_value"] / 1000, targeted["net_expected_value"] / 1000]
 colors = ["#B9B9B9", "#5AD8A6"]
 
 bars = ax1.bar(policies, net_evs, color=colors, edgecolor="white",
                width=0.55, linewidth=2)
 ax1.axhline(0, color="black", linewidth=0.8)
-ax1.set_ylabel("Net expected value ($ / month)", fontsize=11)
+ax1.set_ylabel("Net expected value ($k / month, 2.1M subscribers)", fontsize=11)
 ax1.set_title("Monthly net expected value",
               fontweight="bold", fontsize=13, pad=15)
 
@@ -159,16 +163,16 @@ for bar, val in zip(bars, net_evs):
         y_pos = val + axis_range * 0.03
         va = "bottom"
     ax1.text(bar.get_x() + bar.get_width() / 2, y_pos,
-             f"${val:,.0f}", ha="center", va=va, fontsize=13,
+             f"{'-' if val < 0 else ''}${abs(val):,.0f}k", ha="center", va=va, fontsize=13,
              fontweight="bold",
              color="#333333")
 
 # Annotate the swing
 swing = targeted["net_expected_value"] - baseline["net_expected_value"]
 ax1.annotate(
-    f"+${swing:,.0f}\nmonthly swing",
-    xy=(1, targeted["net_expected_value"]),
-    xytext=(0.5, (baseline["net_expected_value"] + targeted["net_expected_value"]) / 2),
+    f"+${swing / 1000:,.0f}k\nmonthly swing",
+    xy=(1, targeted["net_expected_value"] / 1000),
+    xytext=(0.5, (baseline["net_expected_value"] + targeted["net_expected_value"]) / 2000),
     ha="center", fontsize=12, fontweight="bold", color="#333333",
 )
 ax1.grid(axis="y", linestyle="--", alpha=0.3)
@@ -176,36 +180,31 @@ ax1.set_axisbelow(True)
 ax1.spines["top"].set_visible(False)
 ax1.spines["right"].set_visible(False)
 
-# RIGHT: breakdown of the four metrics side by side
-metrics = ["Users\ncontacted", "Cost", "Retained\nrevenue", "Net EV"]
-blanket_vals = [
-    baseline["n_targeted"],
-    baseline["total_cost"],
-    baseline["expected_retained_revenue"],
-    baseline["net_expected_value"],
-]
-targeted_vals = [
-    targeted["n_targeted"],
-    targeted["total_cost"],
-    targeted["expected_retained_revenue"],
-    targeted["net_expected_value"],
-]
+# RIGHT: dollar breakdown ($k / month); contact counts go in the legend
+metrics = ["Cost", "Retained\nrevenue", "Net EV"]
+blanket_vals = [baseline[k] / 1000 for k in
+                ("total_cost", "expected_retained_revenue", "net_expected_value")]
+targeted_vals = [targeted[k] / 1000 for k in
+                 ("total_cost", "expected_retained_revenue", "net_expected_value")]
 
 x_pos = np.arange(len(metrics))
 width = 0.38
 
 bars1 = ax2.bar(x_pos - width / 2, blanket_vals, width,
-                label="Blanket m11", color="#B9B9B9", edgecolor="white")
+                label=f"Blanket m11 ({baseline['n_targeted']:,.0f} contacted)",
+                color="#B9B9B9", edgecolor="white")
 bars2 = ax2.bar(x_pos + width / 2, targeted_vals, width,
-                label="Targeted", color="#5AD8A6", edgecolor="white")
+                label=f"Targeted ({targeted['n_targeted']:,.0f} contacted)",
+                color="#5AD8A6", edgecolor="white")
 
 ax2.axhline(0, color="black", linewidth=0.6)
 ax2.set_xticks(x_pos)
 ax2.set_xticklabels(metrics, fontsize=10)
-ax2.set_ylabel("$ (except 'Users contacted')", fontsize=10)
+ax2.set_ylabel("$k / month, 2.1M subscribers", fontsize=10)
 ax2.set_title("Blanket vs targeted -- component breakdown",
               fontweight="bold", fontsize=13, pad=15)
-ax2.legend(fontsize=10, loc="upper right", frameon=False)
+ax2.legend(fontsize=9, loc="upper center", bbox_to_anchor=(0.5, -0.12),
+           ncol=2, frameon=False)
 ax2.grid(axis="y", linestyle="--", alpha=0.3)
 ax2.set_axisbelow(True)
 ax2.spines["top"].set_visible(False)
@@ -220,12 +219,12 @@ for b, v in zip(bars1, blanket_vals):
     y_pos = v + label_offset if v >= 0 else v + label_offset
     ax2.text(b.get_x() + b.get_width() / 2, y_pos,
              f"{v:,.0f}", ha="center", va="bottom",
-             fontsize=8, color="#555555")
+             fontsize=9, color="#555555")
 for b, v in zip(bars2, targeted_vals):
     y_pos = v + label_offset if v >= 0 else v + label_offset
     ax2.text(b.get_x() + b.get_width() / 2, y_pos,
              f"{v:,.0f}", ha="center", va="bottom",
-             fontsize=8, color="#333333",
+             fontsize=9, color="#333333",
              fontweight="bold")
 
 plt.suptitle(
@@ -239,7 +238,7 @@ print(f"Saved -> {out_path}")
 plt.show()
 
 # Full verdict block (numbers a reader can quote directly into the memo /
-# README / talking points without having to open Phase 6)
+# README without having to open Phase 6. Full-base figures per month.)
 users_multiplier = (targeted["n_targeted"] / max(baseline["n_targeted"], 1))
 revenue_multiplier = (targeted["expected_retained_revenue"]
                       / max(baseline["expected_retained_revenue"], 1))
@@ -248,17 +247,17 @@ print("Phase 7 hero-figure verdict")
 print("=" * 60)
 print(f"{'':22}{'Blanket m11':>15}{'Targeted':>15}")
 print(f"  {'-'*20}{'-'*15}{'-'*15}")
-print(f"  Users contacted    {baseline['n_targeted']:>15,}"
-      f"{targeted['n_targeted']:>15,}")
+print(f"  Users contacted    {baseline['n_targeted']:>15,.0f}"
+      f"{targeted['n_targeted']:>15,.0f}")
 print(f"  Total cost         "
-      f"${baseline['total_cost']:>14,.0f}"
-      f"${targeted['total_cost']:>14,.0f}")
+      f"{'$' + format(baseline['total_cost'], ',.0f'):>15}"
+      f"{'$' + format(targeted['total_cost'], ',.0f'):>15}")
 print(f"  Retained revenue   "
-      f"${baseline['expected_retained_revenue']:>14,.0f}"
-      f"${targeted['expected_retained_revenue']:>14,.0f}")
+      f"{'$' + format(baseline['expected_retained_revenue'], ',.0f'):>15}"
+      f"{'$' + format(targeted['expected_retained_revenue'], ',.0f'):>15}")
 print(f"  Net EV / month     "
-      f"${baseline['net_expected_value']:>14,.0f}"
-      f"${targeted['net_expected_value']:>14,.0f}")
+      f"{'$' + format(baseline['net_expected_value'], ',.0f'):>15}"
+      f"{'$' + format(targeted['net_expected_value'], ',.0f'):>15}")
 print(f"  ROI                "
       f"{baseline['roi_multiplier']:>14.2f}x"
       f"{targeted['roi_multiplier']:>14.2f}x")

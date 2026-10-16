@@ -38,12 +38,33 @@ INTERVENTION_MENU: Dict[str, Dict[str, float]] = {
 }
 
 # LTV_BY_TIER imported from src/decisions/ltv.py -- derived from Phase 2's
-# Kaplan-Meier survival curves via restricted mean survival time (24-month
-# horizon). Current values: Basic $200, Standard $315, Premium $435.
+# survival curves via restricted mean survival time (24-month horizon).
 
-# Guardrail: premium_upgrade can be offered to at most this fraction
-# of subscribers per month (avoid margin compression)
-PREMIUM_UPGRADE_CAP_PCT = 0.05
+# ---------------------------------------------------------------------
+# Scale: the brief's budget and caps are for the whole subscriber base,
+# but the analysis runs on a 50,000-subscriber sample. Every money or
+# capacity limit is scaled to the sample before it is applied.
+# ---------------------------------------------------------------------
+POPULATION_SUBSCRIBERS = 2_100_000
+MONTHLY_BUDGET = 200_000.0           # $ per month, whole base (brief)
+PREMIUM_OFFERS_PER_MONTH = 10_000    # ops capacity, whole base (brief)
+
+# Guardrail: premium_upgrade can be offered to at most this share of
+# subscribers per month (10k of 2.1M = 0.48%).
+PREMIUM_UPGRADE_CAP_PCT = PREMIUM_OFFERS_PER_MONTH / POPULATION_SUBSCRIBERS
+
+
+def sample_budget(n_sample: int,
+                  monthly_budget: float = MONTHLY_BUDGET,
+                  population: int = POPULATION_SUBSCRIBERS) -> float:
+    """The monthly budget scaled to a sample of `n_sample` subscribers."""
+    return monthly_budget * n_sample / population
+
+
+def to_population(amount: float, n_sample: int,
+                  population: int = POPULATION_SUBSCRIBERS) -> float:
+    """Scale a sample-level count or dollar amount up to the whole base."""
+    return amount * population / n_sample
 
 
 # ---------------------------------------------------------------------
@@ -89,7 +110,7 @@ def pick_best_lever(p_churn: np.ndarray,
     max_idx = ev_matrix.argmax(axis=1)
     max_ev = ev_matrix.max(axis=1)
 
-    best_lever = np.array([lever_names[i] for i in max_idx])
+    best_lever = np.array([lever_names[i] for i in max_idx], dtype=object)
     costs = np.array([menu[n]["cost"] for n in best_lever])
 
     # No intervention if all EVs are non-positive
@@ -98,11 +119,13 @@ def pick_best_lever(p_churn: np.ndarray,
     costs[mask_no_action] = 0.0
     max_ev[mask_no_action] = 0.0
 
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "best_lever": best_lever,
         "best_ev": max_ev,
         "cost": costs,
     })
+    # Keep every lever's EV so a capped lever can fall back to the next best
+    return pd.concat([out, ev_wide], axis=1)
 
 
 # ---------------------------------------------------------------------
@@ -133,28 +156,123 @@ def apply_premium_cap(policy: pd.DataFrame,
                       ) -> pd.DataFrame:
     """Cap the number of 'premium_upgrade' offers at cap_pct of the base.
 
-    Rank premium_upgrade recommendations by EV, drop the ones beyond
-    the cap. For dropped users, re-score without the premium option and
-    take the next-best lever.
+    Rank premium_upgrade recommendations by EV and keep the top ones up
+    to the cap. Users beyond the cap fall back to their best remaining
+    lever if its EV is positive (needs the per-lever `ev_*` columns that
+    pick_best_lever returns), otherwise to no action. Apply this BEFORE
+    apply_budget_cap so the budget is spent on the final lever mix.
     """
     out = policy.copy()
     max_premium = int(np.floor(n_total * cap_pct))
 
-    premium_mask = (out["best_lever"] == "premium_upgrade") & out["will_target"]
+    premium_mask = out["best_lever"] == "premium_upgrade"
+    if "will_target" in out.columns:
+        premium_mask &= out["will_target"]
     if premium_mask.sum() <= max_premium:
         return out
 
     premium_sorted = out[premium_mask].sort_values("best_ev", ascending=False)
     drop_idx = premium_sorted.iloc[max_premium:].index
 
-    # For dropped users, re-target with cheaper lever (credit_5) if EV > 0
+    fallback = [c for c in out.columns
+                if c.startswith("ev_") and c != "ev_premium_upgrade"]
     for i in drop_idx:
-        # naive: fall back to credit_5 if it has positive EV, else no action
-        # (in practice we'd re-run pick_best_lever with premium removed)
-        out.loc[i, "best_lever"] = "credit_5"
-        out.loc[i, "cost"] = INTERVENTION_MENU["credit_5"]["cost"]
-        # EV re-computed elsewhere; for now leave old EV as sort key
+        evs = out.loc[i, fallback].astype(float) if fallback else pd.Series(dtype=float)
+        if len(evs) and evs.max() > 0:
+            lever = evs.idxmax().replace("ev_", "")
+            out.loc[i, ["best_lever", "best_ev", "cost"]] = [
+                lever, float(evs.max()), INTERVENTION_MENU[lever]["cost"]]
+        else:
+            out.loc[i, ["best_lever", "best_ev", "cost"]] = ["none", 0.0, 0.0]
+            if "will_target" in out.columns:
+                out.loc[i, "will_target"] = False
 
+    return out
+
+
+def _choose(ev: np.ndarray, cost: np.ndarray, lam: float,
+            allowed: np.ndarray) -> np.ndarray:
+    """Per user, the lever index maximising EV - lam * cost (-1 = none)."""
+    adj = np.where(allowed, ev - lam * cost[None, :], -np.inf)
+    j = adj.argmax(axis=1)
+    j[adj[np.arange(len(j)), j] <= 0] = -1
+    return j
+
+
+def build_policy(p_churn: np.ndarray,
+                 ltv: np.ndarray,
+                 budget: float,
+                 menu: Dict[str, Dict[str, float]] = INTERVENTION_MENU,
+                 premium_cap_pct: float = PREMIUM_UPGRADE_CAP_PCT,
+                 ) -> pd.DataFrame:
+    """Budget-constrained v1 policy (one lever or none per user).
+
+    With a binding budget, ranking users by raw EV is not optimal: a $1
+    lever earning $0.80 beats a $5 lever earning $2 per dollar spent. The
+    right rule charges every dollar its opportunity cost lam (a Lagrange
+    multiplier): each user gets the lever maximising EV - lam * cost, if
+    that is positive, and lam is the smallest value whose total spend fits
+    the budget. lam = 0 when the budget doesn't bind (plain argmax EV).
+    The premium_upgrade capacity cap is enforced by moving the
+    lowest-value premium users to their best remaining lever.
+
+    Returns the same columns as pick_best_lever plus `will_target`.
+    """
+    names = list(menu)
+    cost = np.array([menu[n]["cost"] for n in names])
+    uplift = np.array([menu[n]["uplift"] for n in names])
+    p = np.asarray(p_churn, dtype=float)
+    ev = p[:, None] * uplift[None, :] * np.asarray(ltv, dtype=float)[:, None] - cost[None, :]
+    allowed = np.ones_like(ev, dtype=bool)
+    max_premium = int(np.floor(len(p) * premium_cap_pct))
+    prem = names.index("premium_upgrade") if "premium_upgrade" in names else None
+
+    def spend(lam: float) -> float:
+        j = _choose(ev, cost, lam, allowed)
+        return float(cost[j[j >= 0]].sum())
+
+    for _ in range(3):  # premium cap can shift spend; re-solve a few times
+        lo, hi = 0.0, 1.0
+        if spend(0.0) > budget:
+            while spend(hi) > budget:
+                hi *= 2
+            for _ in range(60):
+                mid = (lo + hi) / 2
+                lo, hi = (mid, hi) if spend(mid) > budget else (lo, mid)
+            lam = hi
+        else:
+            lam = 0.0
+        j = _choose(ev, cost, lam, allowed)
+        if prem is None or (j == prem).sum() <= max_premium:
+            break
+        prem_users = np.where(j == prem)[0]
+        order = prem_users[np.argsort(-(ev[prem_users, prem] - lam * cost[prem]))]
+        allowed[order[max_premium:], prem] = False
+
+    j = _choose(ev, cost, lam, allowed)
+    # Bisection leaves spend <= budget; drop the least valuable users if a
+    # tie pushed it over.
+    chosen = np.where(j >= 0)[0]
+    total = cost[j[chosen]].sum()
+    if total > budget:
+        val = ev[chosen, j[chosen]] - lam * cost[j[chosen]]
+        for i in chosen[np.argsort(val)]:
+            if total <= budget:
+                break
+            total -= cost[j[i]]
+            j[i] = -1
+
+    target = j >= 0
+    best_lever = np.where(target, np.array(names, dtype=object)[np.maximum(j, 0)], "none")
+    best_ev = np.where(target, ev[np.arange(len(p)), np.maximum(j, 0)], 0.0)
+    out = pd.DataFrame({
+        "best_lever": best_lever,
+        "best_ev": best_ev,
+        "cost": np.where(target, cost[np.maximum(j, 0)], 0.0),
+        "will_target": target,
+    })
+    out = pd.concat([out, pd.DataFrame(ev, columns=[f"ev_{n}" for n in names])], axis=1)
+    out.attrs["shadow_price"] = lam  # $ of EV forgone per extra $ of budget
     return out
 
 

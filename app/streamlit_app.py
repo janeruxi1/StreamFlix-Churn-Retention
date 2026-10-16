@@ -6,8 +6,9 @@ Two views:
     2. Per-user lookup: pick a subscriber_id, see their risk score,
        recommended lever, and top model drivers
 
-The app imports directly from src/ so the math is the same as the
-notebooks. If pytest is green in CI, the demo is correct.
+The app imports directly from src/, so it runs the same tested functions
+as the notebooks. Figures are computed on the 50,000-subscriber sample and
+scaled to the full 2.1M base.
 """
 from __future__ import annotations
 
@@ -21,7 +22,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
 
 from src.data.loader import load_subscribers
 from src.features.transforms import build_features
@@ -32,8 +32,8 @@ from src.models.production import (
 )
 from src.decisions.policy import (
     INTERVENTION_MENU, LTV_BY_TIER, PREMIUM_UPGRADE_CAP_PCT,
-    score_all_levers, pick_best_lever, apply_budget_cap,
-    apply_premium_cap, summarize_policy, simulate_blanket_campaign,
+    build_policy, sample_budget, to_population,
+    summarize_policy, simulate_blanket_campaign,
 )
 
 # --- Page config ---------------------------------------------------------
@@ -156,14 +156,15 @@ if not data_loaded:
 # --- Sidebar controls ----------------------------------------------------
 st.sidebar.header("Policy knobs")
 
-st.sidebar.subheader("Budget cap")
-budget = st.sidebar.slider(
-    "Monthly budget ($k)", min_value=1, max_value=500,
+st.sidebar.subheader("Budget")
+budget_full = st.sidebar.slider(
+    "Monthly budget, full 2.1M base ($k)", min_value=5, max_value=500,
     value=200, step=5,
 ) * 1000
+budget = sample_budget(len(p_churn), budget_full)  # applied to the 50k sample
 
 st.sidebar.subheader("Intervention menu")
-st.sidebar.caption("Cost per user + assumed uplift on P(churn).")
+st.sidebar.caption("Cost per user, and uplift = share of would-be churners retained.")
 
 menu_ui = {}
 for name, defaults in INTERVENTION_MENU.items():
@@ -193,10 +194,8 @@ blanket_cost = st.sidebar.number_input(
 
 
 # --- Compute policies ----------------------------------------------------
-policy = pick_best_lever(p_churn, ltv, menu_ui)
-policy = apply_budget_cap(policy, budget=budget)
-policy = apply_premium_cap(policy, n_total=len(policy),
-                           cap_pct=PREMIUM_UPGRADE_CAP_PCT)
+policy = build_policy(p_churn, ltv, budget=budget, menu=menu_ui,
+                      premium_cap_pct=PREMIUM_UPGRADE_CAP_PCT)
 targeted_summary = summarize_policy(policy, targeted_only=True)
 
 baseline_summary = simulate_blanket_campaign(
@@ -205,6 +204,13 @@ baseline_summary = simulate_blanket_campaign(
     uplift=menu_ui["credit_5"]["uplift"],
 )
 
+# Report on the full-base scale (ROI is scale-free)
+N_SAMPLE = len(p_churn)
+for _s in (targeted_summary, baseline_summary):
+    for _k in ("n_targeted", "total_cost", "expected_retained_revenue",
+               "net_expected_value"):
+        _s[_k] = to_population(_s[_k], N_SAMPLE)
+
 
 # --- Layout: two tabs ----------------------------------------------------
 tab_overview, tab_lookup = st.tabs(["📊 Policy overview", "🔍 Per-user lookup"])
@@ -212,13 +218,14 @@ tab_overview, tab_lookup = st.tabs(["📊 Policy overview", "🔍 Per-user looku
 with tab_overview:
     # KPI row
     st.markdown("### Impact vs current-state blanket campaign")
+    st.caption("Per month, scaled to the full 2.1M-subscriber base.")
     c1, c2, c3, c4 = st.columns(4)
     delta_ev = (targeted_summary["net_expected_value"]
                 - baseline_summary["net_expected_value"])
     c1.metric(
         "Users targeted",
-        f"{targeted_summary['n_targeted']:,}",
-        f"{targeted_summary['n_targeted'] - baseline_summary['n_targeted']:,}",
+        f"{targeted_summary['n_targeted']:,.0f}",
+        f"{targeted_summary['n_targeted'] - baseline_summary['n_targeted']:,.0f}",
     )
     c2.metric(
         "Total cost",
@@ -304,7 +311,7 @@ with tab_lookup:
     ]
     diag = pd.DataFrame({
         "feature": diag_cols,
-        "value": [row[c] for c in diag_cols],
+        "value": [str(row[c]) for c in diag_cols],
     })
     st.dataframe(diag, use_container_width=True, hide_index=True)
 
@@ -323,8 +330,8 @@ with tab_lookup:
 
 st.markdown("---")
 st.caption(
-    "Model: HistGradientBoosting (Optuna-tuned when tuning holds up on test) "
-    "+ Platt calibration. "
+    "Model: HistGradientBoosting (Optuna-tuned) + Platt calibration. "
+    "Budget allocation: shadow-price rule (src/decisions/policy.py). "
     "Full methodology in `notebooks/06_decision_rule.ipynb`. "
     "Decision memo in `reports/decision_memo.md`."
 )

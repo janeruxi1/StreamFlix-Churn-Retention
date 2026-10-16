@@ -1,32 +1,36 @@
-"""Tests for src/decisions/ltv.py -- LTV derivation from KM survival curves.
+"""Tests for src/decisions/ltv.py -- LTV derivation from survival curves.
 
-If the hardcoded LTV_BY_TIER constants in ltv.py drift from what the KM
+If the hardcoded LTV_BY_TIER constants in ltv.py drift from what the
 derivation actually produces on the current dataset, these tests fail.
 """
 import numpy as np
 
 from src.decisions.ltv import (
     LTV_BY_TIER, MONTHLY_REVENUE_BY_TIER, RMST_HORIZON_MONTHS,
-    kaplan_meier, restricted_mean_survival_time, derive_ltv_from_data,
+    life_table_survival, restricted_mean_survival_time, derive_ltv_from_data,
 )
 
 
-def test_kaplan_meier_basic_properties():
-    """S(t) is monotonically non-increasing, starts near 1, stays in [0, 1]."""
-    # Simple example: 5 subjects, 2 churn at t=1, 3 at t=3
-    durations = np.array([1, 1, 3, 3, 3])
-    events = np.array([1, 1, 1, 1, 1])
-    t, S = kaplan_meier(durations, events)
-    assert len(t) == 2
-    assert t[0] == 1
-    assert t[1] == 3
-    # After t=1: 2 of 5 churned -> S = 3/5 = 0.6
-    assert abs(S[0] - 0.6) < 1e-9
-    # After t=3: from 3 remaining, all 3 churned -> S = 0.0
-    assert abs(S[1]) < 1e-9
-    assert (S <= 1).all() and (S >= 0).all()
-    # Monotonic non-increasing
-    assert (np.diff(S) <= 1e-9).all()
+def test_life_table_uses_users_at_each_tenure_as_risk_set():
+    """Month-t hazard = churners at tenure t / users at tenure t.
+
+    Tenure 0: 4 users, 1 churns -> h = 0.25.  Tenure 1: no users -> h = 0.
+    Tenure 2: 2 users, 1 churns -> h = 0.5.
+    """
+    durations = np.array([0, 0, 0, 0, 2, 2])
+    events = np.array([1, 0, 0, 0, 1, 0])
+    t, S = life_table_survival(durations, events)
+    assert list(t) == [1, 2, 3]
+    assert np.allclose(S, [0.75, 0.75, 0.375])
+    assert (np.diff(S) <= 1e-12).all()
+
+
+def test_life_table_matches_constant_hazard():
+    """With the same 5% churn at every tenure, S(t) = 0.95 ** t."""
+    durations = np.repeat(np.arange(24), 100)
+    events = np.tile(np.r_[np.ones(5), np.zeros(95)], 24)
+    _, S = life_table_survival(durations, events)
+    assert np.allclose(S, 0.95 ** np.arange(1, 25))
 
 
 def test_rmst_of_constant_1_is_horizon():
@@ -57,9 +61,8 @@ def test_ltv_constants_match_km_derivation(raw_df):
     horizon and forgets to update the constants, this catches it."""
     derived = derive_ltv_from_data(raw_df, horizon=RMST_HORIZON_MONTHS)
     for tier, expected in LTV_BY_TIER.items():
-        # Allow $10 tolerance for small stochastic variation between
-        # dataset regenerations at different seeds (test fixture uses
-        # 2000 rows, which has more variance than the 50k in production)
+        # Loose tolerance: the test fixture is a 2,000-row sample, which is
+        # much noisier than the 50k production dataset.
         assert abs(derived[tier] - expected) < 60, (
             f"LTV drift for {tier}: hardcoded ${expected}, "
             f"derived ${derived[tier]} on the current dataset. "

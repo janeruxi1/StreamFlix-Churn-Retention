@@ -12,16 +12,17 @@ Running the simulator produces **two CSVs**, one per stage of the project narrat
 | **`subscribers.csv`** | 50,000 × 28 | **v3 baseline** — production data as it looked *before* any retention experiment ran. Everyone's outcome is their untreated potential outcome. | Phase 4 (churn model), 4b (bake-off), 5 (SHAP), 6 (blanket vs targeted policy), 7 (memo / Streamlit app) |
 | **`subscribers_experiment.csv`** | 50,000 × 33 | **v4 experiment** — same rows *plus* the five randomized-treatment columns collected from a 50/50 A/B holdout. | Phase 8 (uplift modeling) |
 
-**Why the split matters for the project narrative.** The original business question was *"our blanket-m11 campaign targets everyone — can we do better with a propensity-based targeting policy?"* Phase 4-6 answer that with the v3 baseline file, arriving at the ROI-optimized targeted policy in the decision memo. Phase 8 is the *second-order* improvement: *"now that we're targeting, can we further improve by running an experiment and learning per-user uplift?"* Loading the two files separately keeps the timeline honest — the experimental data didn't exist when we made the first recommendation.
+**Why the split matters for the project narrative.** The original business question was *"our blanket-m11 campaign targets everyone — can we do better with a propensity-based targeting policy?"* Phase 4-6 answer that with the v3 baseline file, arriving at the ROI-optimized targeted policy in the decision memo. Phase 8 is the follow-up: *"a randomized holdout of the $5 credit has now run: what is its real effect, and can we learn who responds to it?"* Loading the two files separately keeps the timeline honest — the experimental data didn't exist when we made the first recommendation.
 
 ## Why synthetic?
 
 A custom-designed dataset lets us embed:
 
 - **Known ground-truth churn drivers** so we can verify the model recovers them
-- **Known intervention uplift coefficients** (from the PM's prior A/B test) so the cost-aware decision rule has a principled basis
-- **Known customer LTV per tier** so expected ROI is computable
+- **A known treatment effect** for the $5 credit, so targeting policies can be scored against ground truth (Phase 9)
 - **Realistic noise + segment heterogeneity** so the modeling is non-trivial
+
+LTV is not planted: Phase 2 and `src/decisions/ltv.py` estimate it from the data.
 
 See [`../reports/scenario_brief.md`](../reports/scenario_brief.md) for the business framing.
 
@@ -104,21 +105,21 @@ The 28 columns below are in **both** files (`subscribers.csv` and `subscribers_e
 | `churned_next_30d` | int | 1 if churned in next 30 days *under no intervention* (control potential outcome) — **PRIMARY TARGET for Phase 4** |
 
 ### Uplift experiment — v4 columns (`subscribers_experiment.csv` only)
-Simulates a randomized retention experiment: 50% of users receive a lever from the intervention menu, 50% are control. Both the observed outcome and the counterfactual are recorded so the uplift model can be trained *and* validated against ground truth. These columns are **absent** from `subscribers.csv`.
+Simulates a randomized retention experiment: 50% of users receive the $5 credit (`credit_5`), 50% are control. Both potential outcomes are recorded so the uplift model can be trained *and* validated against ground truth. These columns are **absent** from `subscribers.csv`.
 
 | Column | Type | Description |
 |---|---|---|
 | `treated` | int | 1 if user received a treatment, 0 if control (~50/50 split) |
-| `treatment_lever` | str | Assigned lever: `email_nudge`, `credit_5`, `credit_10`, `content_push`, `premium_upgrade`, or `none` for control |
-| `churned_if_treated` | int | 1/0 counterfactual outcome under the assigned lever |
+| `treatment_lever` | str | `credit_5` if treated, `none` for control |
+| `churned_if_treated` | int | 1/0 potential outcome if given the credit (drawn for every user) |
 | `y_observed` | int | Observed outcome under actual assignment = `churned_if_treated` if treated else `churned_next_30d`. **PRIMARY TARGET for Phase 8 uplift modeling.** |
-| `true_uplift` | float | Ground-truth per-user retention lift for the assigned lever (positive = churn reduced). Held out for validation only — never a feature. |
+| `true_uplift` | float | Ground truth: P(churn \| control) − P(churn \| credit_5) for this user, defined for every user (positive = churn reduced). Held out for validation only — never a feature. |
 
 ## Ground truth (hidden from the model)
 
 The simulator embeds the following truths the modeling and policy phases should recover:
 
-- **Baseline 30-day churn:** ~5.5% (matches the PM brief)
+- **Baseline 30-day churn:** 5.3% (the brief cites ~5.5%)
 - **Top drivers of churn:**
   - Declining engagement trend (`watch_hours_last_7d` falling vs `watch_hours_last_90d`)
   - Recent support tickets (`support_tickets_7d` weighted ~10× higher than older tickets)
@@ -130,24 +131,16 @@ The simulator embeds the following truths the modeling and policy phases should 
   - `auto_renew` off
   - `casual` engagement cohort
 - **Stabilizers:** long tenure, annual billing, multi-profile household, Premium tier, high engagement
-- **Heterogeneous response to interventions (from PM's prior A/B test):**
-  - Curated-playlist email is most effective for casual users with mild engagement decline
-  - $5 credit is most effective for users with recent payment failures or expiring promos
-  - 1-month free Premium upgrade is most effective for tenured low-engagement users
-- **Customer LTV per tier:** Basic $9 / mo, Standard $14 / mo, Premium $19 / mo (× tier-specific expected retention months)
+- **Monthly price per tier:** Basic $9, Standard $14, Premium $19 (LTV is estimated from the data, not planted)
 
 ### Uplift-specific ground truth (v4)
 The randomized treatment layer embeds:
 
-- **Base per-lever uplift:** 3% (email_nudge) → 6% (content_push) → 10% (credit_5) → 15% (credit_10) → 18% (premium_upgrade). "Uplift" = absolute reduction in P(churn).
-- **Segment × lever heterogeneity multipliers:**
-  - Payment-failure users × credit levers → **1.6×** (fixing the actual pain point)
-  - Casual users × content push → **1.5×** (they don't know what to watch)
-  - Heavy users × email nudge → **0.3×** (already engaged, nudge is noise)
-  - Trial-drop users (tenure = 2) × credit_5 → **1.8×** (the classic month-2 save)
-  - Expiring-promo users × credit_10 → **1.5×** (renews the promo window)
-- **Sleeping dogs (~5%):** treatment *increases* churn (mod = −0.6× the base). Realistic — the "we miss you" nudge reminds them to cancel. Uplift models are expected to identify and skip these; propensity-only models can't.
-- **Randomization:** treatment is assigned independently of features (Bernoulli 0.5), so any Phase 8 uplift model trained on this data operates in a proper experimental setting.
+- **Relative effect:** the credit retains a share of would-be churners, `P(churn | credit) = P(churn | control) × (1 − r)`, with base r = **15%** (the planning figure the Phase 6 policy uses).
+- **Heterogeneity:** r × **1.6** for users with a payment failure in the last 30 days; r × **1.8** at tenure month 2 (end of trial).
+- **Sleeping dogs (~5%):** r = **−50%**, i.e. the offer raises their churn by half (the "we miss you" nudge reminds them to cancel).
+- **What this implies:** the absolute effect scales with churn risk, so it averages ~0.7pp (5.3% → 4.6%). A 25k-per-arm experiment can confirm that average but is far too small to learn differences between users.
+- **Randomization:** treatment is assigned independently of features (Bernoulli 0.5).
 
 ## Realism audit (v1 → v2 → v3 → v4)
 
@@ -164,8 +157,8 @@ The simulator was iterated based on successive realism audits:
 | Login activity-count companion | none | none | `logins_last_30d` | **`logins_last_30d`** | both recency AND density |
 | Lifecycle events as continuous | n/a | booleans | numeric (days) | **numeric (days)** | lets model learn thresholds |
 | Multi-window nesting (math) | n/a | n/a | Poisson thinning | **Poisson thinning** | matches real event-stream pipelines |
-| Randomized treatment layer | n/a | n/a | n/a | **50/50 + 5 levers** | required for uplift modeling |
-| Heterogeneous treatment effects | n/a | n/a | n/a | **segment × lever multipliers** | real interventions don't have flat uplift |
+| Randomized treatment layer | n/a | n/a | n/a | **50/50, credit_5** | required for uplift modeling |
+| Heterogeneous treatment effects | n/a | n/a | n/a | **relative effect × segment multipliers** | real interventions don't have flat uplift |
 | Sleeping-dog segment | n/a | n/a | n/a | **~5% negative uplift** | matches published retention experiments |
 | Overall churn rate (control) | 5.45% | 6.49% | 5.34% | **5.34%** | 4–8% |
 
@@ -176,6 +169,4 @@ v1 had unimodal engagement (no heavy/casual cohorts) and no time-series. v2 adde
 v2 was inconsistent: 3 watch-hour windows but only 1 distinct-titles window, 1 support-ticket count, 1 payment-failure count. v3 makes every count-style feature multi-window (using Poisson thinning so windows nest correctly) and replaces simple booleans (`recent_downgrade`, `promo_expires_soon`) with continuous `days_since_*` features so the model can learn the right thresholds.
 
 ### v3 → v4 fix (Phase 8 prep)
-v3 gave every user the same "no treatment" world — no way to train an uplift model against it. v4 adds a randomized experimental layer on top of v3 (all v3 columns are unchanged, so Phase 4-6 keep working). Five new columns: `treated`, `treatment_lever`, `churned_if_treated`, `y_observed`, `true_uplift`. The heterogeneity multipliers and sleeping-dog segment give the four uplift meta-learners in Phase 8 something to actually differ on — otherwise a fixed-uplift constant would beat every model.
-
-The v4 dataset is structurally indistinguishable from what a real Retention team would hand to a data scientist on day 1, *plus* the extra experimental columns a mature team would collect from an ongoing A/B holdout.
+v3 gave every user the same "no treatment" world — no way to train an uplift model against it. v4 adds a randomized experimental layer on top of v3 (all v3 columns are unchanged, so Phase 4-6 keep working). Five new columns: `treated`, `treatment_lever`, `churned_if_treated`, `y_observed`, `true_uplift`. An earlier version applied the credit as a flat 10-point cut in churn probability, which made it remove three quarters of all churn; it now scales with each user's risk, so the experiment's average effect matches the size the business planned around.

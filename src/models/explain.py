@@ -253,9 +253,11 @@ FEATURE_INTERVENTION_MAP = {
     },
     "billing_cycle": {
         "lever": "Upgrade-to-annual offer",
-        "tactical_lever": "premium_upgrade",
-        "cost": 12.0,
-        "note": "Convert monthly users to annual for higher retention (plan-structure change)",
+        # No match in the v1 menu: premium_upgrade changes the TIER, not the
+        # billing cycle. An annual-plan offer would need its own test.
+        "tactical_lever": None,
+        "cost": 0.0,
+        "note": "Convert monthly users to annual (not in the v1 lever menu; needs its own test)",
     },
     # --- Raw engagement levels (low = actionable via re-engagement) ------
     "watch_hours_last_7d": {

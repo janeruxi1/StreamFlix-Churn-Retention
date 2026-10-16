@@ -73,8 +73,8 @@ def main():
         "",
         "**Note:** this bootstraps the *default* HistGBM so the script "
         "runs without Optuna. The shipped model is the Optuna-tuned "
-        "variant, whose test PR-AUC is 0.178 and ROC-AUC 0.751 (notebook "
-        "04). Both sit inside these intervals, and so does the +0.007 "
+        "variant, whose test PR-AUC is 0.177 and ROC-AUC 0.750 (notebook "
+        "04). Both sit inside these intervals, and so does the +0.005 "
         "PR-AUC gain from tuning. Exact values can move in the third "
         "decimal across scikit-learn versions.",
         "",

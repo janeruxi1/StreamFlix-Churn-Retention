@@ -1,18 +1,17 @@
-"""LTV constants + KM-derived derivation for the Phase 6 decision rule.
+"""LTV constants + survival-based derivation for the Phase 6 decision rule.
 
 Why this module exists:
-    Phase 6's expected-value math multiplies P(churn) x uplift x LTV. LTV
-    used to be ballpark defaults (Basic $72 = 9 x 8, Standard $140,
-    Premium $228) — reasonable ordinal magnitudes but not derived from
-    data. This module replaces those defaults with LTVs computed from
-    Phase 2's Kaplan-Meier survival curves per plan tier, via restricted
-    mean survival time (RMST) to a 24-month horizon.
+    Phase 6's expected-value math multiplies P(churn) x uplift x LTV. This
+    module derives LTV per plan tier from the data instead of guessing it:
+    a survival curve per tier, then restricted mean survival time (RMST)
+    to a 24-month horizon, times monthly revenue.
 
-Derivation (see notebooks/02_eda.py Section H):
+Derivation (see notebooks/02_eda.py Section C):
     For each plan tier:
-      1. Fit a KM survival curve on all subscribers of that tier
-         (durations = tenure_months, events = churned_next_30d)
-      2. Compute RMST(24) = integral of S(t) from 0 to 24 months
+      1. Build a discrete-time survival curve from the snapshot: the
+         month-t hazard is the 30-day churn rate of subscribers whose
+         tenure is t (life_table_survival below)
+      2. Compute RMST(24) = sum of S over the first 24 months
       3. LTV = RMST x monthly_revenue
 
 The constants below are the derivation output as of the current
@@ -21,7 +20,7 @@ consistency test in tests/test_ltv.py catches drift.
 
 Loading:
     from src.decisions.ltv import LTV_BY_TIER
-    # dict: {"Basic": 200, "Standard": 315, "Premium": 435}
+    # dict: {"Basic": 109, "Standard": 187, "Premium": 296}
 """
 from __future__ import annotations
 
@@ -35,17 +34,17 @@ import pandas as pd
 # in subscription LTV — captures the full anniversary cycle including
 # the m12 churn spike, but doesn't extrapolate too far past the
 # observation window (max tenure in the data is 60 months but only ~8%
-# of users are past 24 months, so KM estimates get noisy past that).
+# of users are past 24 months, so the monthly hazards get noisy past that).
 RMST_HORIZON_MONTHS: int = 24
 
 
-# LTV per plan tier, derived from KM survival curves on the current
+# LTV per plan tier, derived from the survival curves on the current
 # dataset via derive_ltv_from_data() below. Rounded to whole dollars.
 # See tests/test_ltv.py for the drift-detection test.
 LTV_BY_TIER: Dict[str, float] = {
-    "Basic":    200.0,   # RMST 22.27 mo x $9/mo
-    "Standard": 315.0,   # RMST 22.49 mo x $14/mo
-    "Premium":  435.0,   # RMST 22.90 mo x $19/mo
+    "Basic":    109.0,   # RMST 12.11 mo x $9/mo   (S(24) = 0.26)
+    "Standard": 187.0,   # RMST 13.39 mo x $14/mo  (S(24) = 0.32)
+    "Premium":  296.0,   # RMST 15.56 mo x $19/mo  (S(24) = 0.44)
 }
 
 
@@ -58,31 +57,42 @@ MONTHLY_REVENUE_BY_TIER: Dict[str, float] = {
 }
 
 
-def kaplan_meier(durations: np.ndarray,
-                 events: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Homemade Kaplan-Meier estimator (no lifelines dependency).
+def life_table_survival(durations: np.ndarray,
+                        events: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Discrete-time survival curve from a cross-sectional snapshot.
+
+    The data is one snapshot: each subscriber is observed once, at their
+    current tenure, with a 30-day churn outcome. The users who can churn
+    "at month t" are the ones whose tenure IS t right now, so the monthly
+    hazard is
+
+        h(t) = churners with tenure t / subscribers with tenure t
+
+    and S(t + 1) = S(t) * (1 - h(t)). This treats the snapshot as a
+    synthetic cohort, i.e. it assumes month-t hazards are stable over
+    time. (A Kaplan-Meier at-risk set of "tenure >= t" would be wrong
+    here: users above t already survived month t, but that survival was
+    never observed as an event, so the hazards come out far too small.)
 
     Args:
-        durations: tenure at observation for each subject
-        events:    1 if the subject churned in the 30-day window, else 0
+        durations: tenure in whole months at the snapshot
+        events:    1 if the subscriber churned in the next 30 days, else 0
 
     Returns:
-        (event_times, survival_probs) — the step-function corners of S(t).
-        S(0) = 1 implicitly; between event times S is constant.
+        (times, survival): S at the END of each month t = 0, 1, ...,
+        max tenure. S(0) = 1 is implicit at the start.
     """
-    durations = np.asarray(durations)
-    events = np.asarray(events)
-    event_times = np.sort(np.unique(durations[events == 1]))
-    survivors = 1.0
+    durations = np.asarray(durations).astype(int)
+    events = np.asarray(events).astype(int)
     ts, ss = [], []
-    for t in event_times:
-        n_events_at_t = ((durations == t) & (events == 1)).sum()
-        n_at_risk    = (durations >= t).sum()
-        if n_at_risk == 0:
-            break
-        survivors *= (1 - n_events_at_t / n_at_risk)
-        ts.append(t)
-        ss.append(survivors)
+    s = 1.0
+    for t in range(int(durations.max()) + 1):
+        at_t = durations == t
+        n = int(at_t.sum())
+        if n > 0:
+            s *= 1 - events[at_t].sum() / n
+        ts.append(t + 1)
+        ss.append(s)
     return np.array(ts, dtype=float), np.array(ss, dtype=float)
 
 
@@ -91,7 +101,7 @@ def restricted_mean_survival_time(event_times: np.ndarray,
                                   horizon: int = RMST_HORIZON_MONTHS) -> float:
     """Restricted mean survival time up to `horizon`.
 
-    Integrates the KM step function S(t) from 0 to `horizon` using the
+    Integrates the survival step function S(t) from 0 to `horizon` using the
     fact that S is constant between event times.
     """
     prev_t, prev_S = 0.0, 1.0
@@ -109,7 +119,7 @@ def restricted_mean_survival_time(event_times: np.ndarray,
 
 def derive_ltv_from_data(df: pd.DataFrame,
                          horizon: int = RMST_HORIZON_MONTHS) -> Dict[str, float]:
-    """Compute LTV per plan tier from the KM curves on `df`.
+    """Compute LTV per plan tier from the survival curves on `df`.
 
     Args:
         df: subscriber DataFrame with columns `plan_tier`, `tenure_months`,
@@ -123,8 +133,8 @@ def derive_ltv_from_data(df: pd.DataFrame,
     out: Dict[str, float] = {}
     for tier, monthly in MONTHLY_REVENUE_BY_TIER.items():
         sub = df[df["plan_tier"] == tier]
-        t, S = kaplan_meier(sub["tenure_months"].values,
-                             sub["churned_next_30d"].values)
+        t, S = life_table_survival(sub["tenure_months"].values,
+                                   sub["churned_next_30d"].values)
         rmst = restricted_mean_survival_time(t, S, horizon=horizon)
         out[tier] = round(monthly * rmst)
     return out

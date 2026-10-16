@@ -1,205 +1,113 @@
 # Project Summary — StreamFlix Churn Retention
 
-**What was built + what was found.** Single-page catalog of the project's components and headline results. Every number here is verified against the notebook output (see the `verify_memo.py`-style sanity check in `reports/decision_memo.md`'s "verification pass" audit).
+**What was built and what was found.** A one-page catalog of the project, with every headline number traced to the notebook that produces it. Money figures are per month for the full ~2.1M-subscriber base, estimated on a 50,000-subscriber sample (×42). The data is synthetic.
 
 ---
 
 ## 60-second overview
 
-StreamFlix's retention team runs a v0 blanket $5-credit campaign to every user at tenure month 11, losing **$4.8k/month**. This project delivers a cost-aware retention tool in three layers, each measured against that same v0 baseline:
+StreamFlix sends a $5 credit to every subscriber reaching month 11 (~67k a month). This project replaces that with a cost-aware targeting policy, in three parts:
 
-- **Part 1 — Churn model:** predict P(churn) per user
-- **Part 2 — Decision rule (v1):** turn P(churn) + LTV + assumed uplift → EV rule → ship
-- **Part 3 — Uplift enhancement (v2):** replace assumed uplift with per-user learned causal uplift for `credit_5`
+- **Part 1 — Churn model:** predict 30-day churn per subscriber (calibrated gradient boosting).
+- **Part 2 — Decision rule (v1, ships):** `P(churn) × uplift × LTV − cost` per lever, with the budget allocated by shadow price.
+- **Part 3 — Experiment and uplift model (v2, not shipped):** a randomized holdout of the $5 credit measures its average effect; an uplift model trained on it fails to beat random targeting.
 
-**Headline outcome.** Ship v1 now for a **+$23.9k/month swing at 1.64× ROI**. v2 is queued — it would deliver **~21.9× more true retained revenue than blanket** on ground truth, pending a production A/B holdout for validation.
-
----
-
-## Headline numbers at a glance
-
-| Metric | v0 (blanket) | v1 (decision rule) | v2 (uplift) |
-|---|---:|---:|---:|
-| **Users targeted** | 1,587 | 10,933 | ~15k on credit_5-treated ground truth |
-| **Total cost** | $7,935 | $30,162 | ~$75k on credit_5-treated ground truth |
-| **Net EV / month (model-estimated)** | −$4,798 | **+$19,087** | not directly comparable — see Part 3 |
-| **ROI** | 0.40× | 1.64× (at $200k ceiling) | not directly comparable |
-| **True retained revenue (ground truth, credit_5-treated subset)** | $21,180 | $83,859 | **$463,242** |
-| **% of oracle ceiling captured** | ~3% | ~11% | **~62%** |
-
-Two views because Part 2 and Part 3 measure different things:
-- **Part 2 numbers** = model's self-reported EV across the full 50k-user base (v0 vs v1 comparison).
-- **Part 3 numbers** = ground-truth retained revenue on the 25k credit_5-treated subset (v0 vs v2 comparison).
+**Headline.** v1 turns a **−$252k** blanket campaign into **+$174k** net expected value at the $200k budget (ROI 1.87×), a **+$426k** monthly swing on $133k less spend.
 
 ---
 
-## Part 1: The churn model
+## Headline numbers
 
-### What was built
+| | Blanket m11 (today) | v1 targeted | Source |
+|---|---:|---:|---|
+| Subscribers contacted | 66,654 | 118,986 | 06, Sections E–F |
+| Spend | $333k | $200k | 06 |
+| Expected retained revenue | $82k | $374k | 06 |
+| **Net expected value** | **−$252k** | **+$174k** | 06 |
+| ROI | 0.25× | 1.87× | 06 |
 
-- **Feature engineering** (`03_feature_engineering.py`) — 17 engineered features across engagement / recency / lifecycle / composite groups
-- **Family bake-off** (`04b_model_comparison.py`) — 4-family comparison: LR baseline (with LogisticRegressionCV), XGBoost (Optuna-tuned), HistGradientBoosting (Optuna-tuned), Random Forest
-- **Production training** (`04_modeling.py`) — train default HistGBM + Optuna-tuned HistGBM, pick winner on held-out **TEST** PR-AUC, Platt-calibrate the winner, persist via `src/models/production.py`
-- **Interpretability** (`05_shap_levers.py`) — SHAP on the uncalibrated HistGBM with two-layer diagnostic → tactical crosswalk (35 features mapped to 3 operational levers via `src/models/explain.py:FEATURE_INTERVENTION_MAP`)
-- **Fairness audit** (`05b_fairness_audit.py`) — PR-AUC, Brier, calibration curves, targeting-rate parity, recall parity across plan_tier / engagement_cohort / tenure_bucket / country, with auto-flag concerns loop
+| Part 3 head-to-head (credit only, $200k, 3,010 held-out users, scored against true effects) | True net value | Source |
+|---|---:|---|
+| v1: churn risk × 15% | +$130k | 09, Section C |
+| v2: uplift model | −$132k | 09 |
+| Random | −$149k | 09 |
+| Oracle | +$233k | 09 |
 
-### Key findings
+---
 
-| Finding | Number / evidence |
+## Part 1 — Churn model
+
+**Built:**
+- **Notebook 03:** 17 engineered features (engagement trend, recency, lifecycle, composites).
+- **Notebook 04b:** a four-family bake-off (logistic regression, XGBoost, HistGBM, random forest), each Optuna- or CV-tuned.
+- **Notebook 04:** tuned HistGBM with Platt calibration, persisted via `src/models/production.py`. The tuned variant was chosen before scoring the test set.
+- **Notebook 05:** SHAP with a driver → candidate-lever map (`src/models/explain.py`).
+- **Notebook 05b:** fairness and calibration audit on held-out rows.
+
+| Finding | Value |
 |---|---|
-| PR-AUC (primary metric for ~5% positive class) | **0.18** (bootstrap 95% interval roughly 0.14–0.20) |
-| ROC-AUC | 0.75 |
-| Brier score (calibration) | 0.047 |
-| Top-5% lift | **4.6×** (catches 23.2% of all real churners) |
-| Top-10% lift | **3.6×** (catches 35.6% of all real churners) |
-| Top-20% lift | 2.7× (catches 53.7%) |
-| Bake-off ordering | tuned HistGBM > tuned LR > default LR > tuned XGBoost > default HistGBM > default XGBoost > Random Forest (top four within 0.003 PR-AUC, far inside the bootstrap interval) |
-| Family choice vs tuning contribution | Family choice dominates tuning by ~5-10× at this dataset size |
-| Fairness concerns | Modest calibration gap on the **casual engagement cohort** (Brier delta above auto-flag threshold). No under-service or recall-parity violations across other segments. |
-
-**Why HistGBM over XGBoost (both trees):** HistGBM beats XGBoost on PR-AUC in the bake-off (both default and Optuna-tuned), has identical tree-model production properties (SHAP TreeExplainer, native missing-value handling, noise tolerance), and drops the external `xgboost` dependency (sklearn-only).
-
-**Why not tuned LR (a statistical tie on the raw metric):** LR is competitive on PR-AUC on this synthetic dataset (Phase 3 feature engineering captured most of the non-linearity), but lacks tree-model production properties — no SHAP richness, needs imputation for missing values, more brittle on noisier real data.
+| PR-AUC (test, 534 churners in 10k) | **0.177**; bootstrap 95% interval about ±0.03; random = 0.053 |
+| ROC-AUC / Brier | 0.750 / 0.047 (base-rate Brier 0.051) |
+| Lift: top 5% / 10% / 20% | 4.6× / 3.5× / 2.7× (catch 23% / 35% / 53% of churners) |
+| Model families | LR 0.178, tuned XGBoost 0.178, tuned HistGBM 0.177: statistically tied. HistGBM kept for practical reasons, LR is the fallback |
+| Calibration by segment | Within ±13% everywhere except **month 12**: predicted 4.9% vs observed 8.3% (p = 0.014) |
+| Targeting by segment | Low for low-churn groups (heavy viewers, tenure 25+); follows churn and LTV, not miscalibration |
 
 ---
 
-## Part 2: Decision rule (v1) — what we ship
+## Part 2 — Decision rule (v1)
 
-### What was built
+**Built:**
+- **`src/decisions/ltv.py`:** LTV per tier from life-table survival curves (monthly hazard = churn rate at each tenure), 24-month restricted mean survival × price: **Basic $109, Standard $187, Premium $296**.
+- **`src/decisions/policy.py`:** EV per subscriber × lever, then `build_policy`, which allocates a binding budget by shadow price λ (each subscriber gets the lever maximising `EV − λ × cost`), with the Premium-upgrade capacity cap inside the same loop.
+- **Scale:** the brief's $200k budget and 10k Premium cap are scaled to the sample, and results are scaled back.
 
-- **EV formula** (`06_decision_rule.py`, `src/decisions/policy.py`):
-  ```
-  EV(user, lever) = P(churn) × uplift(lever) × LTV(tier) − cost(lever)
-  ```
-  Target user if best available lever has positive EV; sort by EV desc, cumulative-cost cutoff at budget cap; apply 5% premium-upgrade guardrail.
-- **Intervention menu** — 3 tactical levers with PM-curated cost + assumed uplift:
-  - `curated_playlist` ($1 cost, 5% assumed uplift)
-  - `credit_5` ($5, 15%)
-  - `premium_upgrade` ($12, 25%)
-- **LTV per tier** (`src/decisions/ltv.py`) — derived from Kaplan-Meier survival curves via restricted mean survival time (24-month horizon), NOT ballpark defaults:
-  - Basic $200, Standard $315, Premium $435
-- **Budget sweep** — 16-point curated grid from $2k to $500k, shows ROI-vs-total-EV trade-off
-- **Sensitivity analysis** — ±50% uplift sweep + 12-60 month LTV horizon sweep
-- **Hero figure + Streamlit app** (`07_hero_figure.py`, `app/streamlit_app.py`) — visual + interactive delivery
-
-### Key findings — v0 vs v1
-
-| Metric | v0 (blanket m11) | v1 (targeted, $200k ceiling) | Δ |
-|---|---:|---:|---:|
-| Users contacted | 1,587 | 10,933 | +9,346 (**6.9×**) |
-| Total cost | $7,935 | $30,162 | +$22,227 |
-| Expected retained revenue | $3,137 | $49,249 | **+$46,112 (15.7×)** |
-| Net expected value | −$4,798 | **+$19,087** | **+$23,885** |
-| ROI | 0.40× | 1.64× | +1.24× |
-
-### Key findings — ROI-vs-EV trade-off (budget sweep)
-
-| Budget | Users | Cost | Net EV | ROI | Note |
-|---:|---:|---:|---:|---:|---|
-| $5k | 416 | $5k | $6.2k | **2.24×** | peak ROI |
-| $7.5k | 625 | $7.5k | $7.9k | 2.06× | last budget clearing 2.0× |
-| $10k | 833 | $10k | $9.2k | 1.92× | |
-| $30k | 10,771 | $30k | **$19.1k** | 1.64× | max total EV (policy saturates) |
-| $50k–$200k | 10,933 | $30k | $19.1k | 1.63× | dormant — no more positive-EV users |
-
-**Recommended operating budget:** $30k (max total impact). Governance ceiling: $200k (circuit-breaker). If finance requires 2.0× ROI hard target, $7.5k is the largest budget that clears it (accepting $7.9k EV instead of $19.1k).
-
-### Key findings — sensitivity
-
-| Uplift scale | ROI |
-|---:|---:|
-| 0.5× (50% weaker) | 1.43× (still beats v0) |
-| 1.0× (baseline) | 1.63× |
-| 1.5× (50% stronger) | 1.80× (plateau — more uplift adds users, not per-user EV) |
-
-- **Uplift ±50%:** targeted always beats blanket.
-- **LTV horizon 12-60mo:** direction of recommendation unchanged.
-- **2.0× ROI at $200k is NOT reachable via uplift alone** — even at 1.5× the assumed uplift, ROI plateaus at 1.80×. Getting to 2.0× requires either a smaller budget (trade impact for ROI) or a stronger model (event-stream features).
-
-### Key findings — lever mix
-
-| Lever | Users targeted | % of targeted | Total spend | % of budget |
-|---|---:|---:|---:|---:|
-| `curated_playlist` | 7,608 | **69.6%** | $7,608 | 25.2% |
-| `credit_5` | 2,478 | 22.7% | $12,390 | **41.1%** |
-| `premium_upgrade` | 847 | 7.7% | $10,164 | 33.7% |
-
-`curated_playlist` dominates by user count (cheapest lever = lowest EV break-even = broadest capture); `credit_5` dominates by dollar spend (5× cost per user). Two views tell different stories to the retention team vs the CFO.
+| Finding | Value |
+|---|---|
+| Positive-EV subscribers | 9.6% of the base; covering them all would cost $415k |
+| Shadow price at $200k | λ = 0.31 (the last dollar returns $1.31) |
+| Allocation method | Shadow price beats ranking by raw EV by **33%** ($174k vs $131k) |
+| Lever mix (contacts / spend) | playlist 85% / 50%, credit 14% / 43%, Premium upgrade 1% / 7% |
+| Budget for ROI ≥ 2.0× | ≤ $150k (net EV $155k) |
+| Uplift ×0.5 / ×1.5 | net EV $18k / $362k; ROI 1.32× / 2.81× |
+| LTV horizon 12 / 36 months | net EV $44k / $273k |
+| Blanket m11 coverage | v1 contacts only 4% of m11 subscribers |
 
 ---
 
-## Part 3: Uplift enhancement (v2) — future work
+## Part 3 — Experiment and uplift model (v2)
 
-### What was built
+**Built:**
+- **Notebook 08:** experiment ATE with CI, and four uplift learners (S, T, X, class transformation) with Qini curves.
+- **Notebook 09:** blanket vs v1 vs v2 vs oracle vs random at equal spend, on users neither model trained on, scored against true uplift.
 
-- **Randomized experimental data** (`src/data/simulate.py`) — single-arm design: 50% control (~25k) + 50% treated with `credit_5` (~25k). Chosen over multi-arm to maximize statistical power for the one lever we causally validate.
-- **Uplift meta-learner bake-off** (`08_uplift_modeling.py`) — 4 wrappers around a shared HistGradientBoosting base estimator:
-  - S-learner (treatment as feature)
-  - T-learner (two independent per-arm models)
-  - X-learner (residual-imputation + propensity weighting)
-  - ClassTransformation (single-classifier reformulation)
-- **Winner selection** — Qini AUC on the held-out test set; persisted via `src/models/production.py:load_production_uplift_model()`
-- **Head-to-head** (`09_policy_comparison.py`) — v0 blanket vs v1 propensity vs v2 uplift, all restricted to credit_5 for apples-to-apples, scored against the simulator's `true_uplift` ground truth on the 25k credit_5-treated subset. Includes oracle-ceiling framing.
-
-### Key findings — v0 vs v2 (on ground-truth credit_5-treated subset)
-
-| Policy | Users targeted (in observed) | True retained revenue | vs v0 |
-|---|---:|---:|---:|
-| v0 blanket m11 (credit_5 only) | 784 | $21,180 | — |
-| v2 uplift-based | 14,969 | **$463,242** | **~21.9×** |
-
-Framed against a perfect-ranker oracle (target every user with `true_uplift × LTV > $5`):
-- **Oracle ceiling:** $752,420
-- **v0 captures ~3%** of the ceiling
-- **v2 captures ~62%** of the ceiling — closes roughly six-sevenths of the gap v0 leaves
-
-### Key findings — v1 vs v2 (marginal step)
-
-On the same ground-truth subset, v2 delivers **~5.5× the true retained revenue of v1** ($463k vs $84k) by catching the **persuadable middle** — users at moderate churn risk but high responsiveness that v1's high-risk-first EV threshold filters out. Precision is similar for both (~95% persuadable-hit rate); the difference is v2's volume.
-
-### Key findings — sleeping-dog gap (real limitation)
-
-Both v1 and v2 target sleeping dogs (users where treatment INCREASES churn) at ~5%, matching the population base rate. v2 catches persuadables well but **can't yet sharply avoid sleeping dogs** — that's the specific weakness a production A/B holdout would tighten before shipping.
-
-### Status
-
-**v2 is not yet shipped.** Gated on:
-1. Production randomized A/B holdout to validate the ~62%-of-ceiling number on fresh data
-2. Sleeping-dog rate improvement (currently at random baseline)
-3. Multi-lever extension if needed (`curated_playlist` + `premium_upgrade` would each need their own experimental arm)
+| Finding | Value |
+|---|---|
+| Churn, control vs credit | 5.28% vs 4.61%: **−0.67pp** (95% CI 0.29–1.05pp) |
+| Relative effect | **12.6%** of would-be churners retained (CI 5–20%) vs 15% assumed |
+| Uplift learners | Qini ≈ 0 for all four; rank correlation with true uplift +0.02 |
+| Rank correlation with true value | v1 0.82, v2 0.00 |
+| Verdict | Keep v1; use the experiment to calibrate its credit uplift; don't ship v2 |
 
 ---
 
-## Key design decisions + rationale
+## Key design decisions
 
-**Why HistGradientBoosting for production (not XGBoost or LR):**
-Phase 4b bake-off showed HistGBM beats XGBoost on PR-AUC. Tuned LR ties it on the aggregate metric but lacks tree-model production properties (SHAP richness, missing-value handling, noise tolerance). HistGBM drops the external `xgboost` dependency (sklearn-only). The bake-off itself is in `notebooks/04b_model_comparison.py`.
-
-**Why single-arm experiment (not multi-arm):**
-Original design was 5 levers × 5k treated each = fragmented statistical power per lever. Single-arm gives 25k credit_5-treated users — 5× more training data, 5× more ground-truth evaluation. Trade-off: no ground truth for other levers; v1.1 multi-lever uplift would need a new experiment.
-
-**Why 24-month LTV horizon (not 36 or 48):**
-Longer horizons inflate LTV based on KM tail estimates from a shrinking, survivor-biased sub-population (~30% of users observed to 24 months, ~5% to 48, ~1% to 60). 24 months is the point where the sample is large enough to trust AND captures the m12 anniversary churn spike. Sensitivity table in Phase 6 Section H.5 shows the full trade-off.
-
-**Why two-layer diagnostic vs tactical lever design:**
-Phase 5's SHAP output uses a rich 10-category diagnostic vocabulary for human interpretation ("re-engagement email", "white-glove support callback"); Phase 6's decision rule uses 3 operational levers the retention platform actually deploys. Rich vocabulary for humans, simple menu for automation, connected via documented crosswalk.
-
-**Why v1 ships before v2:**
-v1 replaces the blanket loss with $19.1k monthly gain immediately. v2 sleeping-dog identification is still at random baseline — needs a production A/B holdout to sharpen. Better to deliver v1 value now than optimize the storyline.
-
-**Why "path to 2.0× ROI" is honest, not spun:**
-The kickoff metric framework set 2.0× ROI as the ship bar. v1 delivers 1.64× at $200k ceiling. Rather than manipulating uplift assumptions or budget to hit the number, the memo explicitly says 2.0× isn't reachable at v1 quality; the CFO can pick a smaller operating budget (2.24× at $5k) or accept 1.64× for max total EV. Full trade-off on the page.
+- **Model choice on practical grounds, not noise.** The top models are tied within the bootstrap interval, so the test set isn't used to pick between them.
+- **Survival from a snapshot.** Each subscriber is seen once, so the month-t hazard is the churn rate of subscribers at tenure t. A Kaplan-Meier at-risk set of "tenure ≥ t" would treat survival through month t as observed when it wasn't, and overstate retention (S(24) of 0.92–0.96 instead of 0.26–0.44).
+- **Shadow-price allocation.** Under a binding budget, the right comparison is value per dollar at the margin, not raw EV.
+- **Equal-spend comparison of policies.** Comparing policies that contact different numbers of people mostly measures how many people they contact.
+- **Uplift modelling tested, not assumed.** The experiment is powered for the average effect, not for per-user effects; the head-to-head shows it.
 
 ---
 
-## Limitations honestly named
+## Limitations
 
-- **Synthetic data.** The dataset is generated by `src/data/simulate.py` with embedded ground truth. Real-world event streams (playback completion, notifications, cross-device usage) would push PR-AUC higher than 0.18 and change some findings.
-- **Training-set overlap in Phase 9 head-to-head.** Both models have some in-sample presence on the evaluation subset (~80% for v1, ~14% for v2). Comparison is "each model at its best on shared users," not strictly held-out. Real deployment needs a fresh randomized holdout.
-- **Uplift model only for `credit_5`.** No ground truth for other tactical levers (`curated_playlist`, `premium_upgrade`). v1's policy for those levers still uses assumed uplift.
-- **Sleeping-dog identification at random baseline.** Both v1 and v2 hit sleeping dogs at ~5% (matching population base rate). Not a v1 blocker (blanket does the same) but a v2 growth area.
-- **2.0× ROI target not achieved at $200k.** ROI plateaus at 1.80× even with 50% stronger assumed uplift — need stronger model, not just better assumptions.
-- **PR-AUC 0.18 is modest.** Tabular snapshots cap what any model can extract; event-stream features are the biggest headroom.
+- **Synthetic data.** The ground truth is known by construction; real data would be noisier.
+- **Untested uplift assumptions.** The playlist and Premium-upgrade uplifts are untested planning figures. Playlists are 85% of contacts.
+- **No out-of-time validation.** Validation is a random split (60/20/20), and LTV assumes stable monthly hazards.
+- **In-sample scores.** Policy scores for the whole base include the model's training rows.
+- **Guardrail breached.** About 72% of spend goes to subscribers who would not have churned, against a < 30% guardrail that no useful policy can meet at a 5% base rate (see the memo).
 
 ---
 
@@ -207,49 +115,20 @@ The kickoff metric framework set 2.0× ROI as the ship bar. v1 delivers 1.64× a
 
 | Artifact | Path |
 |---|---|
-| Shipped churn model | `models/churn_model_v1.pkl` (loaded via `src.models.production.load_production_churn_model()`) |
-| Shipped uplift model (v2, not yet in production) | `models/uplift_credit_5_v1.pkl` (loaded via `src.models.production.load_production_uplift_model()`) |
-| MLflow tracking | `mlruns/` — 12+ runs under `streamflix_churn` experiment; Registry alias `@production` |
-| Decision memo (stakeholder-facing) | `reports/decision_memo.md` |
+| Decision memo | `reports/decision_memo.md` |
+| PM brief, metric framework | `reports/scenario_brief.md`, `reports/metrics_framework.md` |
+| Metric confidence intervals | `reports/metric_confidence_intervals.md` (`scripts/bootstrap_churn_ci.py`) |
 | Hero figure | `reports/figures/07_hero_summary.png` |
 | Interactive tool | `streamlit run app/streamlit_app.py` |
-| Metric framework (kickoff) | `reports/metrics_framework.md` |
-| Original PM brief | `reports/scenario_brief.md` |
-| Tests | `tests/` — 88 pytest, GitHub Actions CI with a lint step |
-| Simulator | `src/data/simulate.py` |
-| Decision-rule math | `src/decisions/policy.py` |
-| LTV derivation | `src/decisions/ltv.py` (KM RMST @ 24mo) |
-| Feature engineering | `src/features/transforms.py` |
-| Model training + tuning | `src/models/train.py` |
-| SHAP + intervention crosswalk | `src/models/explain.py` |
-| Uplift meta-learners | `src/models/uplift.py` |
-| Production paths (single source of truth) | `src/models/production.py` |
-
----
+| Notebooks 01–09 | `notebooks/` (`.py` source, `.ipynb` generated and executed) |
+| Data and ground truth | `data/README.md` |
+| Structure, MLflow, tests | `docs/DETAILS.md` |
 
 ## How to read the notebooks
 
-The three-part narrative maps to notebook numbering:
-
 ```
-Setup (data + features)
-├── 01_data_audit.py            data quality checks
-├── 02_eda.py                   exploratory + KM survival + LTV derivation
-└── 03_feature_engineering.py   17 engineered features
-
-Part 1 (churn model)
-├── 04_modeling.py              train default + tuned HistGBM, calibrate, ship
-├── 04b_model_comparison.py     4-family bake-off audit
-├── 05_shap_levers.py           SHAP + two-layer lever crosswalk
-└── 05b_fairness_audit.py       segment-parity audit
-
-Part 2 (decision rule v1)
-├── 06_decision_rule.py         EV rule + budget sweep + sensitivity
-└── 07_hero_figure.py           chart generator for memo + README
-
-Part 3 (uplift enhancement v2)
-├── 08_uplift_modeling.py       4 meta-learners on credit_5
-└── 09_policy_comparison.py     v0 vs v1 vs v2 head-to-head
+01 data audit → 02 EDA + survival → 03 features
+→ 04 model → 04b bake-off → 05 SHAP → 05b fairness/calibration     (Part 1)
+→ 06 decision rule → 07 hero figure                                (Part 2)
+→ 08 experiment + uplift → 09 policy head-to-head                  (Part 3)
 ```
-
-Read top-to-bottom for the full story; skip to Part 2 if you just want the shipping recommendation; skip to Part 3 if you want the causal-ML enhancement.
