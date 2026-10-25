@@ -62,7 +62,7 @@ python src/data/simulate.py              # generate both CSVs
 python notebooks/04_modeling.py          # train + persist churn model
 python notebooks/08_uplift_modeling.py   # train + persist uplift model
 python scripts/bootstrap_churn_ci.py     # metric confidence intervals
-pytest tests/ && ruff check src tests scripts   # 93 tests
+pytest tests/ && ruff check src tests scripts   # 93 tests (+3 app smoke tests locally)
 streamlit run app/streamlit_app.py       # decision-support app
 ```
 

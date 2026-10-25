@@ -1,97 +1,117 @@
 """StreamFlix Retention -- interactive decision-support app.
 
-Two views:
-    1. Overview: sidebar controls for budget, uplift, cost knobs;
-       shows policy summary and comparison against blanket baseline
-    2. Per-user lookup: pick a subscriber_id, see their risk score,
-       recommended lever, and top model drivers
+Tabs:
+    1. Targeted vs blanket  -- the monthly business case and how it moves with budget
+    2. Look up a subscriber -- risk score, the reasons behind it, and the action
+    3. Assumptions          -- lever costs and uplifts, blanket-campaign settings
 
-The app imports directly from src/, so it runs the same tested functions
-as the notebooks. Figures are computed on the 50,000-subscriber sample and
+The app imports directly from src/, so it runs the same tested functions as
+the notebooks. Figures are computed on the 50,000-subscriber sample and
 scaled to the full 2.1M base.
 """
 from __future__ import annotations
 
-import sys
 import pickle
+import sys
 from pathlib import Path
 
 # Make src/ importable when running with `streamlit run app/streamlit_app.py`
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import numpy as np
-import pandas as pd
-import streamlit as st
+import altair as alt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import streamlit as st  # noqa: E402
 
-from src.data.loader import load_subscribers
-from src.features.transforms import build_features
-from src.models.train import prepare_features
-from src.models.production import (
-    CHURN_MODEL_PATH, CHURN_MODEL_ARTIFACT_KEY,
-    load_production_churn_model,
+from src.data.loader import load_subscribers  # noqa: E402
+from src.decisions.policy import (  # noqa: E402
+    INTERVENTION_MENU, LTV_BY_TIER, POPULATION_SUBSCRIBERS,
+    PREMIUM_UPGRADE_CAP_PCT, build_policy, sample_budget,
+    simulate_blanket_campaign, summarize_policy, to_population,
 )
-from src.decisions.policy import (
-    INTERVENTION_MENU, LTV_BY_TIER, PREMIUM_UPGRADE_CAP_PCT,
-    build_policy, sample_budget, to_population,
-    summarize_policy, simulate_blanket_campaign,
+from src.features.transforms import build_features  # noqa: E402
+from src.models.explain import map_to_intervention  # noqa: E402
+from src.models.production import (  # noqa: E402
+    CHURN_MODEL_ARTIFACT_KEY, CHURN_MODEL_PATH, load_production_churn_model,
 )
+from src.models.train import prepare_features  # noqa: E402
 
-# --- Page config ---------------------------------------------------------
-st.set_page_config(
-    page_title="StreamFlix Retention",
-    page_icon="💸",
-    layout="wide",
-)
+REPO_URL = "https://github.com/janeruxi1/StreamFlix-Churn-Retention"
+TEAL, ORANGE, GREY, RED = "#0F766E", "#DD6B20", "#A0AEC0", "#C53030"
+LEVER_LABEL = {
+    "curated_playlist": "🎬 Curated playlist",
+    "credit_5": "💵 $5 credit",
+    "premium_upgrade": "⭐ Premium upgrade",
+    "none": "No contact",
+}
+LEVER_ORDER = ["curated_playlist", "credit_5", "premium_upgrade"]
+# Axis labels in $k, e.g. $200k / -$250k (d3's "s" format repeats labels)
+KAXIS = ("(datum.value < 0 ? '-' : '') + '$' + "
+         "format(abs(datum.value) / 1000, ',.0f') + 'k'")
+
+st.set_page_config(page_title="StreamFlix Retention", page_icon="💸", layout="wide")
+
+
+def money(x: float) -> str:
+    """Dollar string that never trips Streamlit's $...$ maths rendering."""
+    sign = "-" if x < 0 else ""
+    return f"{sign}\\${abs(x):,.0f}"
+
+
+def cents(x: float) -> str:
+    """Per-subscriber dollars with cents, escaped for markdown."""
+    sign = "-" if x < 0 else ""
+    return f"{sign}\\${abs(x):,.2f}"
+
+
+def money_plain(x: float) -> str:
+    """Dollar string for widgets that do not render markdown (metrics, tables)."""
+    sign = "-" if x < 0 else ""
+    return f"{sign}${abs(x):,.0f}"
+
+
+def k(x: float) -> str:
+    sign = "-" if x < 0 else "+"
+    return f"{sign}\\${abs(x) / 1000:,.0f}k"
+
+
+def nice(feature: str) -> str:
+    return feature.replace("_", " ").replace(" 7d", " (7 days)").replace(
+        " 30d", " (30 days)").replace(" 90d", " (90 days)").replace(
+        " 180d", " (180 days)").capitalize()
 
 
 # --- Bootstrap: generate data + model if missing (for Streamlit Cloud) ----
 def _bootstrap_if_needed() -> None:
-    """First-boot setup for Streamlit Cloud, where the repo is cloned
-    fresh and data/ and models/ are gitignored. Uses the same path
-    constant as everywhere else via src/models/production.py, so the
-    bootstrap and the main load stay in sync automatically."""
+    """First-boot setup for Streamlit Cloud, where models/ is gitignored.
+    Trains the same model notebook 04 ships: Optuna-tuned HistGradientBoosting
+    with Platt calibration, on the same seeded splits."""
     data_path = Path("data/subscribers.csv")
-
     if not data_path.exists():
-        with st.spinner("First-boot setup: generating synthetic dataset..."):
-            from src.data.simulate import simulate_subscribers, SimConfig
+        with st.spinner("First-boot setup: generating the synthetic dataset..."):
+            from src.data.simulate import SimConfig, simulate_subscribers
             data_path.parent.mkdir(parents=True, exist_ok=True)
             simulate_subscribers(SimConfig()).to_csv(data_path, index=False)
 
     if not CHURN_MODEL_PATH.exists():
-        with st.spinner("First-boot setup: training model (this runs once)..."):
+        with st.spinner("First-boot setup: training the churn model (about a minute, once)..."):
             from sklearn.model_selection import train_test_split
-            from src.models.train import (
-                train_logistic_regression, train_hist_gbm,
-                tune_hist_gbm_optuna, calibrate_model,
-            )
+
             from src.models.evaluate import compute_metrics
-            raw = load_subscribers(str(data_path))
-            df = build_features(raw)
+            from src.models.train import (
+                calibrate_model, train_logistic_regression, tune_hist_gbm_optuna,
+            )
+            df = build_features(load_subscribers(str(data_path)))
             X, y = prepare_features(df)
             X_temp, X_test, y_temp, y_test = train_test_split(
-                X, y, test_size=0.2, stratify=y, random_state=42,
-            )
+                X, y, test_size=0.2, stratify=y, random_state=42)
             X_train, X_calib, y_train, y_calib = train_test_split(
-                X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42,
-            )
-            # Trains the SAME model Phase 4 ships to production: LR baseline
-            # + calibrated HistGradientBoosting (default vs Optuna-tuned,
-            # winner selected on TEST PR-AUC). Kept in sync with
-            # 04_modeling.py so a fresh Streamlit Cloud boot produces
-            # byte-identical artifacts.
+                X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42)
             lr = train_logistic_regression(X_train, y_train)
-            hgb_default = train_hist_gbm(X_train, y_train)
-            hgb_tuned, _best_params = tune_hist_gbm_optuna(
-                X_train, y_train, X_calib, y_calib,
-                n_trials=25, random_state=42,
-            )
-            # Pick winner on TEST PR-AUC (same rule Phase 4 uses)
-            default_pr = compute_metrics(
-                y_test, hgb_default.predict_proba(X_test)[:, 1])["pr_auc"]
-            tuned_pr = compute_metrics(
-                y_test, hgb_tuned.predict_proba(X_test)[:, 1])["pr_auc"]
-            hgb = hgb_tuned if tuned_pr > default_pr else hgb_default
+            # Notebook 04 ships the tuned variant by design (decided before
+            # scoring the test set), so the app does the same.
+            hgb, _ = tune_hist_gbm_optuna(X_train, y_train, X_calib, y_calib,
+                                          n_trials=25, random_state=42)
             hgb_cal = calibrate_model(hgb, X_calib, y_calib, method="sigmoid")
             CHURN_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(CHURN_MODEL_PATH, "wb") as f:
@@ -112,226 +132,342 @@ def _bootstrap_if_needed() -> None:
                 }, f)
 
 
-# --- Load everything once ------------------------------------------------
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading the model and scoring 50,000 subscribers...")
 def load_pipeline():
     _bootstrap_if_needed()
-    raw = load_subscribers("data/subscribers.csv")
-    df = build_features(raw)
-    X, y = prepare_features(df)
-    # Load via src/models/production.py so we're guaranteed to be reading
-    # the same artifact Phase 4 wrote and Phase 6/7 also read from.
+    df = build_features(load_subscribers("data/subscribers.csv"))
+    X, _ = prepare_features(df)
     model, artifact = load_production_churn_model()
     X = X[artifact["feature_names"]]
     p_churn = model.predict_proba(X)[:, 1]
     ltv = df["plan_tier"].map(LTV_BY_TIER).values
-    tenure = df["tenure_months"].values
-    return df, p_churn, ltv, tenure
+    return df.reset_index(drop=True), X.reset_index(drop=True), model, p_churn, ltv
+
+
+@st.cache_resource(show_spinner=False)
+def shap_explainer(_model):
+    """TreeExplainer on the uncalibrated tree inside the calibration wrapper
+    (calibration is monotonic, so it does not change which features matter)."""
+    import shap
+    inner = _model.calibrated_classifiers_[0].estimator
+    tree = getattr(inner, "estimator", inner)  # unwrap FrozenEstimator
+    return shap.TreeExplainer(tree)
+
+
+def menu_key(menu: dict) -> tuple:
+    return tuple((n, menu[n]["cost"], menu[n]["uplift"]) for n in LEVER_ORDER)
+
+
+@st.cache_data(show_spinner=False)
+def budget_sweep(_p, _ltv, key: tuple) -> pd.DataFrame:
+    menu = {n: {"cost": c, "uplift": u} for n, c, u in key}
+    rows = []
+    for b in range(25_000, 500_001, 25_000):
+        s = summarize_policy(build_policy(_p, _ltv, budget=sample_budget(len(_p), b),
+                                          menu=menu, premium_cap_pct=PREMIUM_UPGRADE_CAP_PCT))
+        rows.append({"budget": b,
+                     "net": to_population(s["net_expected_value"], len(_p)),
+                     "roi": s["roi_multiplier"]})
+    return pd.DataFrame(rows)
 
 
 try:
-    df, p_churn, ltv, tenure = load_pipeline()
-    data_loaded = True
+    df, X, model, p_churn, ltv = load_pipeline()
 except FileNotFoundError as e:
-    data_loaded = False
-    error_msg = str(e)
+    st.error("Couldn't load the model or dataset. Run `python src/data/simulate.py` "
+             f"and `python notebooks/04_modeling.py` first.\n\n**Details:** {e}")
+    st.stop()
+N_SAMPLE = len(p_churn)
 
 
 # --- Header --------------------------------------------------------------
 st.title("💸 StreamFlix Retention Targeting")
 st.markdown(
-    "Interactive tool for the Retention team. Adjust intervention costs, "
-    "uplifts, and budget to see how the recommendation changes."
+    "StreamFlix sends a **\\$5 credit to every subscriber in their 11th month**. "
+    "This tool replaces that blanket campaign with a targeted one: a churn model "
+    "scores every subscriber, and each one gets the cheapest offer that pays for "
+    "itself, or nothing, within a monthly budget. "
+    "*Synthetic data; figures are per month for the full 2.1M-subscriber base.*"
 )
+with st.expander("ℹ️ How to use this demo"):
+    st.markdown(
+        """
+1. **💰 Targeted vs blanket**: the monthly business case. Move the budget slider
+   to see how many people to contact and what it earns.
+2. **👤 Look up a subscriber**: pick an example (or type an ID) to see their churn
+   risk, the reasons behind it, and the offer they get.
+3. **⚙️ Assumptions**: change each offer's cost and how many would-be churners
+   it keeps. Every tab updates.
 
-if not data_loaded:
-    st.error(
-        f"Couldn't load the model or dataset. Run "
-        f"`python src/data/simulate.py` and `python notebooks/04_modeling.py` "
-        f"first.\n\n**Details:** {error_msg}"
-    )
-    st.stop()
-
-
-# --- Sidebar controls ----------------------------------------------------
-st.sidebar.header("Policy knobs")
-
-st.sidebar.subheader("Budget")
-budget_full = st.sidebar.slider(
-    "Monthly budget, full 2.1M base ($k)", min_value=5, max_value=500,
-    value=200, step=5,
-) * 1000
-budget = sample_budget(len(p_churn), budget_full)  # applied to the 50k sample
-
-st.sidebar.subheader("Intervention menu")
-st.sidebar.caption("Cost per user, and uplift = share of would-be churners retained.")
-
-menu_ui = {}
-for name, defaults in INTERVENTION_MENU.items():
-    st.sidebar.markdown(f"**{name}**")
-    c1, c2 = st.sidebar.columns(2)
-    cost = c1.number_input(
-        f"cost ${name}", min_value=0.0, max_value=50.0,
-        value=float(defaults["cost"]), step=0.5,
-        key=f"cost_{name}", label_visibility="collapsed",
-    )
-    uplift = c2.number_input(
-        f"uplift {name}", min_value=0.0, max_value=1.0,
-        value=float(defaults["uplift"]), step=0.01,
-        format="%.2f",
-        key=f"uplift_{name}", label_visibility="collapsed",
-    )
-    menu_ui[name] = {"cost": cost, "uplift": uplift}
-
-st.sidebar.subheader("Baseline comparison")
-blanket_month = st.sidebar.slider(
-    "Blanket target tenure month", min_value=1, max_value=24, value=11,
-)
-blanket_cost = st.sidebar.number_input(
-    "Blanket $ per user", min_value=0.0, max_value=50.0,
-    value=5.0, step=0.5,
-)
-
-
-# --- Compute policies ----------------------------------------------------
-policy = build_policy(p_churn, ltv, budget=budget, menu=menu_ui,
-                      premium_cap_pct=PREMIUM_UPGRADE_CAP_PCT)
-targeted_summary = summarize_policy(policy, targeted_only=True)
-
-baseline_summary = simulate_blanket_campaign(
-    p_churn=p_churn, ltv=ltv, tenure_months=tenure,
-    cost_per_user=blanket_cost, target_month=blanket_month,
-    uplift=menu_ui["credit_5"]["uplift"],
-)
-
-# Report on the full-base scale (ROI is scale-free)
-N_SAMPLE = len(p_churn)
-for _s in (targeted_summary, baseline_summary):
-    for _k in ("n_targeted", "total_cost", "expected_retained_revenue",
-               "net_expected_value"):
-        _s[_k] = to_population(_s[_k], N_SAMPLE)
-
-
-# --- Layout: two tabs ----------------------------------------------------
-tab_overview, tab_lookup = st.tabs(["📊 Policy overview", "🔍 Per-user lookup"])
-
-with tab_overview:
-    # KPI row
-    st.markdown("### Impact vs current-state blanket campaign")
-    st.caption("Per month, scaled to the full 2.1M-subscriber base.")
-    c1, c2, c3, c4 = st.columns(4)
-    delta_ev = (targeted_summary["net_expected_value"]
-                - baseline_summary["net_expected_value"])
-    c1.metric(
-        "Users targeted",
-        f"{targeted_summary['n_targeted']:,.0f}",
-        f"{targeted_summary['n_targeted'] - baseline_summary['n_targeted']:,.0f}",
-    )
-    c2.metric(
-        "Total cost",
-        f"${targeted_summary['total_cost']:,.0f}",
-        f"${targeted_summary['total_cost'] - baseline_summary['total_cost']:,.0f}",
-        delta_color="inverse",
-    )
-    c3.metric(
-        "Net EV / month",
-        f"${targeted_summary['net_expected_value']:,.0f}",
-        f"${delta_ev:,.0f}",
-    )
-    c4.metric(
-        "ROI",
-        f"{targeted_summary['roi_multiplier']:.2f}x",
-        f"{targeted_summary['roi_multiplier'] - baseline_summary['roi_multiplier']:+.2f}x",
+**Net value** = revenue kept from subscribers who would otherwise have left,
+minus the cost of the offers. **ROI** = revenue kept per dollar spent.
+"""
     )
 
-    # Side-by-side comparison table
-    st.markdown("### Head-to-head")
-    def _fmt(row, v):
-        if row == "roi_multiplier":
-            return f"{v:.2f}x"
-        if row == "n_targeted":
-            return f"{v:,.0f}"
-        return f"${v:,.0f}"
+tab_case, tab_user, tab_assume = st.tabs(
+    ["💰 Targeted vs blanket", "👤 Look up a subscriber", "⚙️ Assumptions"])
 
-    compare = pd.DataFrame({
-        row: {c: _fmt(row, v[row])
-              for c, v in [("Blanket baseline", baseline_summary),
-                           ("Targeted policy", targeted_summary)]}
-        for row in ["n_targeted", "total_cost",
-                    "expected_retained_revenue",
-                    "net_expected_value", "roi_multiplier"]
-    }).T
-    compare.index = ["Users contacted", "Total cost",
-                     "Expected retained revenue",
-                     "Net expected value", "ROI multiplier"]
-    st.dataframe(compare, use_container_width=True)
-
-    # Lever mix
-    if targeted_summary["n_targeted"] > 0:
-        st.markdown("### Lever mix (targeted only)")
-        lever_mix = (policy[policy["will_target"]]["best_lever"]
-                     .value_counts().rename_axis("lever")
-                     .reset_index(name="users"))
-        lever_mix["share"] = (lever_mix["users"] /
-                              lever_mix["users"].sum()).map("{:.1%}".format)
-        st.dataframe(lever_mix, use_container_width=True, hide_index=True)
-
-
-with tab_lookup:
-    st.markdown("### Look up a specific subscriber")
-
-    df_lookup = df.copy()
-    df_lookup["p_churn"] = p_churn
-    df_lookup["best_lever"] = policy["best_lever"].values
-    df_lookup["best_ev"] = policy["best_ev"].values
-    df_lookup["will_target"] = policy["will_target"].values
-
-    # Simple selector: subscriber_id
-    sub_id = st.selectbox(
-        "Subscriber ID",
-        options=df_lookup["subscriber_id"].sort_values().tolist(),
-        index=int(np.argmax(p_churn)),
+# --- Assumptions tab first: its widgets feed every other tab --------------
+with tab_assume:
+    st.markdown(
+        "Only the \\$5 credit was tested in a randomised holdout. The playlist and "
+        "Premium uplifts are **planning assumptions**, so try lower values and "
+        "watch the business case on the first tab."
     )
-    row = df_lookup[df_lookup["subscriber_id"] == sub_id].iloc[0]
+    menu_ui = {}
+    cols = st.columns(3)
+    for col, name in zip(cols, LEVER_ORDER):
+        d = INTERVENTION_MENU[name]
+        with col.container(border=True):
+            st.markdown(f"**{LEVER_LABEL[name]}**")
+            cost = st.number_input("Cost per subscriber ($)", 0.0, 50.0,
+                                   float(d["cost"]), 0.5, key=f"cost_{name}")
+            uplift = st.slider("Would-be churners it keeps (%)", 0, 60,
+                               int(round(d["uplift"] * 100)), 1, key=f"uplift_{name}")
+            menu_ui[name] = {"cost": cost, "uplift": uplift / 100}
+    st.markdown("**Current blanket campaign (the baseline)**")
+    b1, b2 = st.columns(2)
+    blanket_month = b1.slider("Sent in tenure month", 1, 24, 11, key="blanket_month")
+    blanket_cost = b2.number_input("Credit per subscriber ($)", 0.0, 50.0, 5.0, 0.5,
+                                   key="blanket_cost")
+    st.caption(
+        "The blanket campaign uses the \\$5 credit's uplift. Premium upgrades are "
+        f"capped at {PREMIUM_UPGRADE_CAP_PCT:.2%} of subscribers a month "
+        "(10,000 offers) by operations capacity."
+    )
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("P(churn) 30d", f"{row['p_churn']:.1%}")
-    c2.metric("Plan", row["plan_tier"])
-    c3.metric("Tenure (months)", row["tenure_months"])
-    c4.metric("Recommended", row["best_lever"])
+def compute(budget_full_dollars: float):
+    pol = build_policy(p_churn, ltv, budget=sample_budget(N_SAMPLE, budget_full_dollars),
+                       menu=menu_ui, premium_cap_pct=PREMIUM_UPGRADE_CAP_PCT)
+    tgt = summarize_policy(pol, targeted_only=True)
+    base = simulate_blanket_campaign(
+        p_churn=p_churn, ltv=ltv, tenure_months=df["tenure_months"].values,
+        cost_per_user=blanket_cost, target_month=blanket_month,
+        uplift=menu_ui["credit_5"]["uplift"])
+    for s in (tgt, base):
+        for key in ("n_targeted", "total_cost", "expected_retained_revenue",
+                    "net_expected_value"):
+            s[key] = to_population(s[key], N_SAMPLE)
+    return pol, tgt, base
 
-    st.markdown("### Why the model flagged this user")
-    diag_cols = [
-        "watch_hours_last_7d", "watch_hours_last_30d",
-        "days_since_last_login", "logins_last_30d",
-        "support_tickets_7d", "support_tickets_30d",
-        "payment_failures_30d", "payment_failures_90d",
-        "days_since_plan_change", "days_until_promo_expires",
-        "auto_renew", "engagement_cohort",
-    ]
-    diag = pd.DataFrame({
-        "feature": diag_cols,
-        "value": [str(row[c]) for c in diag_cols],
-    })
-    st.dataframe(diag, use_container_width=True, hide_index=True)
+
+# =====================================================================
+# TAB 1 -- TARGETED VS BLANKET
+# =====================================================================
+with tab_case:
+    st.slider("Monthly budget for the whole base ($k)", 5, 500, 200, 5, key="budget_k",
+              help="The brief's budget is $200k a month. The policy spends up to "
+                   "this, and less if fewer offers pay for themselves.")
+    budget_full = st.session_state["budget_k"] * 1000
+    policy, tgt, base = compute(budget_full)
+    swing = tgt["net_expected_value"] - base["net_expected_value"]
+
+    if swing > 0:
+        st.success(
+            f"**Targeting earns {k(tgt['net_expected_value'])} a month** against "
+            f"{k(base['net_expected_value'])} for the blanket campaign: a "
+            f"{k(swing)} swing while spending "
+            f"{money(tgt['total_cost'])} instead of {money(base['total_cost'])}."
+        )
+    else:
+        st.warning("Under these assumptions targeting does **not** beat the blanket "
+                   "campaign. Check the uplifts on the Assumptions tab.")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Net value / month, targeted", money_plain(tgt["net_expected_value"]),
+              border=True, help="Revenue kept minus offer cost, full base.")
+    m2.metric("Net value / month, blanket", money_plain(base["net_expected_value"]),
+              border=True, help=f"\\${blanket_cost:.0f} credit to everyone in month "
+                                f"{blanket_month}.")
+    m3.metric("ROI, targeted", f"{tgt['roi_multiplier']:.2f}×",
+              f"{tgt['roi_multiplier'] - base['roi_multiplier']:+.2f}× vs blanket",
+              border=True, help="Revenue kept per dollar spent.")
+    m4.metric("Subscribers contacted", f"{tgt['n_targeted']:,.0f}", border=True,
+              help=f"{tgt['n_targeted'] / POPULATION_SUBSCRIBERS:.1%} of the 2.1M base.")
+
+    left, right = st.columns([1, 1])
+    with left:
+        st.markdown("**Spend and return, per month**")
+        comp = pd.DataFrame([
+            {"campaign": "Blanket", "what": "Offer cost", "dollars": base["total_cost"]},
+            {"campaign": "Blanket", "what": "Revenue kept",
+             "dollars": base["expected_retained_revenue"]},
+            {"campaign": "Targeted", "what": "Offer cost", "dollars": tgt["total_cost"]},
+            {"campaign": "Targeted", "what": "Revenue kept",
+             "dollars": tgt["expected_retained_revenue"]},
+        ])
+        chart = alt.Chart(comp).mark_bar().encode(
+            y=alt.Y("campaign:N", title=None, sort=["Targeted", "Blanket"]),
+            yOffset=alt.YOffset("what:N", sort=["Revenue kept", "Offer cost"]),
+            x=alt.X("dollars:Q", title="Dollars per month", axis=alt.Axis(labelExpr=KAXIS)),
+            color=alt.Color("what:N", scale=alt.Scale(domain=["Revenue kept", "Offer cost"],
+                                                      range=[TEAL, ORANGE]),
+                            legend=alt.Legend(title=None, orient="bottom")),
+            tooltip=["campaign", "what", alt.Tooltip("dollars:Q", format="$,.0f")])
+        st.altair_chart(chart.properties(height=220), width="stretch")
+        st.caption("The blanket campaign spends more than it keeps: most people in "
+                   "month 11 were never going to leave.")
+    with right:
+        st.markdown("**Who gets which offer**")
+        mix = (policy.loc[policy["will_target"], "best_lever"].value_counts()
+               .reindex(LEVER_ORDER, fill_value=0).rename_axis("lever")
+               .reset_index(name="n"))
+        mix["subscribers"] = mix["n"].map(lambda v: to_population(v, N_SAMPLE))
+        mix["offer"] = mix["lever"].map(LEVER_LABEL)
+        mix["share"] = mix["n"] / max(1, mix["n"].sum())
+        bars = alt.Chart(mix).mark_bar(color=TEAL).encode(
+            y=alt.Y("offer:N", sort=[LEVER_LABEL[n] for n in LEVER_ORDER], title=None,
+                    axis=alt.Axis(labelLimit=220)),
+            x=alt.X("subscribers:Q", title="Subscribers per month (full base)"),
+            tooltip=["offer", alt.Tooltip("subscribers:Q", format=",.0f"),
+                     alt.Tooltip("share:Q", format=".1%")])
+        st.altair_chart(bars.properties(height=220), width="stretch")
+        st.caption("Cheap playlists go to many moderate-risk subscribers; costly "
+                   "offers are kept for high-risk, high-value ones.")
+
+    st.markdown("**How much budget is worth spending?**")
+    sweep = budget_sweep(p_churn, ltv, menu_key(menu_ui))
+    base_line = base["net_expected_value"]
+    line = alt.Chart(sweep).mark_line(color=TEAL, strokeWidth=3, point=True).encode(
+        x=alt.X("budget:Q", title="Monthly budget", axis=alt.Axis(labelExpr=KAXIS)),
+        y=alt.Y("net:Q", title="Net value per month", axis=alt.Axis(labelExpr=KAXIS)),
+        tooltip=[alt.Tooltip("budget:Q", format="$,.0f", title="Budget"),
+                 alt.Tooltip("net:Q", format="$,.0f", title="Net value"),
+                 alt.Tooltip("roi:Q", format=".2f", title="ROI")])
+    you = alt.Chart(pd.DataFrame({"budget": [budget_full],
+                                  "net": [tgt["net_expected_value"]]})).mark_circle(
+        size=200, color=ORANGE).encode(x="budget:Q", y="net:Q")
+    blanket_rule = alt.Chart(pd.DataFrame({"y": [base_line]})).mark_rule(
+        color=RED, strokeDash=[6, 4]).encode(y="y:Q")
+    st.altair_chart((blanket_rule + line + you).properties(height=280), width="stretch")
+    st.caption(
+        "Teal: targeted policy at each budget. Dashed red: the blanket campaign. "
+        "Orange dot: your budget. Each extra dollar earns less than the one before, "
+        "so ROI falls as the budget rises."
+    )
+
+    with st.expander("Head-to-head table"):
+        table = pd.DataFrame({
+            "Blanket campaign": [f"{base['n_targeted']:,.0f}", money_plain(base["total_cost"]),
+                                 money_plain(base["expected_retained_revenue"]),
+                                 money_plain(base["net_expected_value"]),
+                                 f"{base['roi_multiplier']:.2f}×"],
+            "Targeted policy": [f"{tgt['n_targeted']:,.0f}", money_plain(tgt["total_cost"]),
+                                money_plain(tgt["expected_retained_revenue"]),
+                                money_plain(tgt["net_expected_value"]),
+                                f"{tgt['roi_multiplier']:.2f}×"],
+        }, index=["Subscribers contacted", "Offer cost", "Revenue kept",
+                  "Net value", "ROI"])
+        st.dataframe(table, width="stretch")
+
+
+# =====================================================================
+# TAB 2 -- LOOK UP A SUBSCRIBER
+# =====================================================================
+with tab_user:
+    look = df[["subscriber_id", "plan_tier", "tenure_months"]].copy()
+    look["p_churn"] = p_churn
+    look = pd.concat([look, policy.reset_index(drop=True)], axis=1)
+
+    def pick(mask, by="p_churn"):
+        sub = look[mask]
+        return None if sub.empty else int(sub.sort_values(by, ascending=False)
+                                          ["subscriber_id"].iloc[0])
+
+    best_any = look.filter(like="ev_").max(axis=1)
+    look["best_any"] = best_any
+    examples = {
+        "Highest churn risk": pick(look["p_churn"] > -1),
+        "Gets a Premium upgrade": pick(look["best_lever"] == "premium_upgrade"),
+        "Gets a $5 credit": pick(look["best_lever"] == "credit_5"),
+        "Gets a curated playlist": pick(look["best_lever"] == "curated_playlist"),
+        "Worth contacting, but over budget": pick(~look["will_target"] & (best_any > 0),
+                                                   by="best_any"),
+        "Low risk, left alone": pick((look["p_churn"] < 0.01) & ~look["will_target"],
+                                     by="tenure_months"),
+    }
+    examples = {name: sid for name, sid in examples.items() if sid is not None}
+
+    c1, c2 = st.columns([2, 1])
+    choice = c1.radio("Pick an example subscriber", list(examples), key="example",
+                      horizontal=True)
+    typed = c2.text_input("…or type a subscriber ID", key="sub_id",
+                          placeholder=f"e.g. {examples[choice]}")
+    sub_id = examples[choice]
+    if typed.strip():
+        if typed.strip().isdigit() and int(typed) in set(look["subscriber_id"]):
+            sub_id = int(typed)
+        else:
+            st.warning("That ID is not in the 50,000-subscriber sample; showing the "
+                       "selected example instead.")
+    i = int(look.index[look["subscriber_id"] == sub_id][0])
+    row = look.loc[i]
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Chance of leaving in 30 days", f"{row['p_churn']:.1%}", border=True,
+              help=f"Average across subscribers: {p_churn.mean():.1%}.")
+    m2.metric("Plan", row["plan_tier"], border=True)
+    m3.metric("Months subscribed", int(row["tenure_months"]), border=True)
+    m4.metric("Lifetime value if kept", money_plain(ltv[i]), border=True,
+              help="Expected revenue over the next 24 months for this plan.")
 
     if row["will_target"]:
         st.success(
-            f"**Action:** apply `{row['best_lever']}` "
-            f"— cost ${menu_ui[row['best_lever']]['cost']:.2f}, "
-            f"expected value ${row['best_ev']:.2f}"
+            f"**Action: {LEVER_LABEL[row['best_lever']]}** — costs "
+            f"{cents(row['cost'])}, expected to earn {cents(row['best_ev'])} net."
+        )
+    elif best_any[i] > 0:
+        st.info(
+            "**Action: no contact this month.** An offer would pay for itself "
+            f"(best: {cents(best_any[i])} net), but others earn more per dollar and "
+            "the budget runs out first. Raise the budget to reach them."
         )
     else:
-        st.info(
-            "**Action:** no intervention. "
-            "No lever has positive expected value for this user."
-        )
+        st.info("**Action: no contact.** No offer earns back its cost for this "
+                "subscriber: their risk or value is too low.")
+
+    with st.expander("Value of each offer for this subscriber"):
+        ev_rows = pd.DataFrame({
+            "Offer": [LEVER_LABEL[n] for n in LEVER_ORDER],
+            "Cost": [money_plain(menu_ui[n]["cost"]) for n in LEVER_ORDER],
+            "Expected net value": [f"{row[f'ev_{n}']:+,.2f}" for n in LEVER_ORDER],
+        })
+        st.dataframe(ev_rows, hide_index=True, width="stretch")
+        st.caption("Expected net value = churn risk × share kept × lifetime value − cost.")
+
+    st.markdown("**Why the model gives this risk score**")
+    try:
+        expl = shap_explainer(model)(X.iloc[[i]])
+        contrib = pd.DataFrame({"feature": X.columns, "value": X.iloc[i].values,
+                                "shap": expl.values[0]})
+        contrib = contrib.reindex(contrib["shap"].abs().sort_values(ascending=False).index)
+        contrib = contrib.head(8)
+        contrib["reason"] = [f"{nice(f)} = {v:.3g}" if isinstance(v, (int, float, np.number))
+                             else f"{nice(f)} = {v}"
+                             for f, v in zip(contrib["feature"], contrib["value"])]
+        contrib["effect"] = np.where(contrib["shap"] > 0, "Raises risk", "Lowers risk")
+        contrib["angle"] = [map_to_intervention(f)["lever"] for f in contrib["feature"]]
+        chart = alt.Chart(contrib).mark_bar().encode(
+            y=alt.Y("reason:N", sort=contrib["reason"].tolist(), title=None,
+                    axis=alt.Axis(labelLimit=320, labelOverlap=False)),
+            x=alt.X("shap:Q", title="Push on churn risk (log-odds, SHAP)"),
+            color=alt.Color("effect:N", scale=alt.Scale(
+                domain=["Raises risk", "Lowers risk"], range=[RED, TEAL]),
+                legend=alt.Legend(title=None, orient="bottom")),
+            tooltip=["reason", "effect", alt.Tooltip("shap:Q", format="+.2f"),
+                     alt.Tooltip("angle:N", title="Related retention angle")])
+        st.altair_chart(chart.properties(height=36 * len(contrib)), width="stretch")
+        st.caption("Red bars push this subscriber's risk up, teal bars pull it down. "
+                   "A value of -1 means 'never' (e.g. never changed plan). Hover a "
+                   "bar for the retention angle it points to.")
+    except ImportError:
+        st.caption("Install `shap` to see the reasons behind each score.")
 
 
-st.markdown("---")
+st.divider()
 st.caption(
-    "Model: HistGradientBoosting (Optuna-tuned) + Platt calibration. "
-    "Budget allocation: shadow-price rule (src/decisions/policy.py). "
-    "Full methodology in `notebooks/06_decision_rule.ipynb`. "
-    "Decision memo in `reports/decision_memo.md`."
+    "Model: HistGradientBoosting (Optuna-tuned) with Platt calibration, scored on a "
+    "50,000-subscriber sample and scaled to 2.1M. Budget allocation: shadow-price "
+    f"rule in `src/decisions/policy.py`. [Decision memo]({REPO_URL}/blob/main/reports/"
+    f"decision_memo.md) · [Source on GitHub]({REPO_URL})"
 )

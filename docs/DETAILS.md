@@ -65,7 +65,7 @@ pip install -r requirements.txt
 python src/data/simulate.py                  # generate both CSVs (baseline + experiment)
 python notebooks/04_modeling.py              # train + persist the churn model (uses baseline)
 python notebooks/08_uplift_modeling.py      # train + persist the uplift model (uses experiment)
-pytest tests/                                # run the 93 unit tests
+pytest tests/                                # 93 unit tests (+3 app smoke tests if streamlit/optuna/shap are installed)
 streamlit run app/streamlit_app.py           # launch the decision-support app
 ```
 
@@ -79,11 +79,12 @@ The retention team can interact with the policy without touching the notebooks:
 streamlit run app/streamlit_app.py
 ```
 
-Two tabs:
-- **Policy overview** — KPI row (users targeted, cost, net EV, ROI), head-to-head against the current blanket-m11 baseline, lever mix
-- **Per-user lookup** — pick a subscriber ID, see the risk score, diagnostic features, and recommended lever
+Three tabs:
+- **💰 Targeted vs blanket** — the monthly business case: net value and ROI of the targeted policy against the month-11 blanket credit, spend vs revenue kept, who gets which offer, and net value across budgets from $25k to $500k (budget slider on this tab)
+- **👤 Look up a subscriber** — example subscribers (highest risk, one per offer, over budget, low risk) or any ID: churn risk, plan, lifetime value, the action and why (budget cut-off vs no offer pays), the value of each offer, and a SHAP chart of the reasons behind the score
+- **⚙️ Assumptions** — cost and uplift of each offer and the blanket campaign's month and credit; every tab updates
 
-Sidebar controls let anyone poke at the budget, per-lever cost, uplift assumptions, and blanket-baseline parameters. The app imports directly from `src/`, so the math is the same as the notebooks and is protected by the same 93 unit tests. See [`app/README.md`](../app/README.md) for deployment to Streamlit Community Cloud.
+The app imports directly from `src/`, so the math is the same as the notebooks and is protected by the same 93 unit tests; `tests/test_app_smoke.py` (3 more tests, run where streamlit, optuna and shap are installed) runs the app itself and checks it shows the reported +$174k / 1.87×. See [`app/README.md`](../app/README.md) for deployment to Streamlit Community Cloud.
 
 **Live demo:** [https://janeruxi1-streamflix-churn-retention.streamlit.app/](https://janeruxi1-streamflix-churn-retention.streamlit.app/)
 
